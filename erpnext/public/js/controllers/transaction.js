@@ -806,7 +806,6 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 							item_tax_template: item.item_tax_template,
 							child_doctype: item.doctype,
 							child_docname: item.name,
-							is_old_subcontracting_flow: me.frm.doc.is_old_subcontracting_flow,
 							use_serial_batch_fields: item.use_serial_batch_fields,
 							serial_and_batch_bundle: item.serial_and_batch_bundle,
 						},
@@ -1292,7 +1291,7 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 			["Purchase Order", "Purchase Receipt", "Purchase Invoice"].includes(this.frm.doctype) &&
 			!this.frm.doc.shipping_address
 		) {
-			let is_drop_ship = me.frm.doc.items.some((item) => item.delivered_by_supplier);
+			const is_drop_ship = me.frm.doc.items.some((item) => item.delivered_by_supplier);
 
 			if (!is_drop_ship) {
 				erpnext.utils.get_shipping_address(this.frm, function () {
@@ -2261,6 +2260,8 @@ erpnext.TransactionController = class TransactionController extends erpnext.taxe
 			for (const [key, value] of Object.entries(child)) {
 				if (!["doctype", "name"].includes(key)) {
 					if (key === "price_list_rate") {
+						const doc = frappe.get_doc(child.doctype, child.name);
+						if (doc) doc.price_list_rate = value; // silent update so rate trigger uses correct value
 						frappe.model.set_value(child.doctype, child.name, "rate", value);
 					}
 

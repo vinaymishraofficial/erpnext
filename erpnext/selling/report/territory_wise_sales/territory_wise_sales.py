@@ -104,46 +104,33 @@ def get_data(filters=None):
 
 
 def get_opportunities(filters):
-	conditions = ""
+	orm_filters = {}
 
 	if filters.get("transaction_date"):
-		conditions = " WHERE transaction_date between {} and {}".format(
-			frappe.db.escape(filters["transaction_date"][0]),
-			frappe.db.escape(filters["transaction_date"][1]),
-		)
+		orm_filters["transaction_date"] = [
+			"between",
+			[filters["transaction_date"][0], filters["transaction_date"][1]],
+		]
 
-	if filters.company:
-		if conditions:
-			conditions += " AND"
-		else:
-			conditions += " WHERE"
-		conditions += " company = %(company)s"
+	if filters.get("company"):
+		orm_filters["company"] = filters["company"]
 
-	return frappe.db.sql(
-		f"""
-		SELECT name, territory, opportunity_amount
-		FROM `tabOpportunity` {conditions}
-	""",
-		filters,
-		as_dict=1,
-	)  # nosec
+	return frappe.get_all(
+		"Opportunity", fields=["name", "territory", "opportunity_amount"], filters=orm_filters
+	)
 
 
 def get_quotations(opportunities):
 	if not opportunities:
 		return []
 
-	opportunity_names = [o.name for o in opportunities]
+	opportunity_names = [o.get("name") for o in opportunities]
 
-	return frappe.db.sql(
-		"""
-		SELECT `name`,`base_grand_total`, `opportunity`
-		FROM `tabQuotation`
-		WHERE docstatus=1 AND opportunity in ({})
-	""".format(", ".join(["%s"] * len(opportunity_names))),
-		tuple(opportunity_names),
-		as_dict=1,
-	)  # nosec
+	return frappe.get_all(
+		"Quotation",
+		fields=["name", "base_grand_total", "opportunity"],
+		filters={"docstatus": 1, "opportunity": ["in", opportunity_names]},
+	)
 
 
 def get_sales_orders(quotations):

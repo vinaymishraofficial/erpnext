@@ -89,19 +89,11 @@ class SupplierScorecard(Document):
 			throw(_("Criteria weights must add up to 100%"))
 
 	def calculate_total_score(self):
-		scorecards = frappe.db.sql(
-			"""
-			SELECT
-				scp.name
-			FROM
-				`tabSupplier Scorecard Period` scp
-			WHERE
-				scp.scorecard = %(sc)s
-				AND scp.docstatus = 1
-			ORDER BY
-				scp.end_date DESC""",
-			{"sc": self.name},
-			as_dict=1,
+		scorecards = frappe.get_all(
+			"Supplier Scorecard Period",
+			fields=["name"],
+			filters={"scorecard": self.name, "docstatus": 1},
+			order_by="end_date desc",
 		)
 
 		period = 0
@@ -181,20 +173,15 @@ def daterange(start_date, end_date):
 
 
 def refresh_scorecards():
-	scorecards = frappe.db.sql(
-		"""
-		SELECT
-			sc.name
-		FROM
-			`tabSupplier Scorecard` sc""",
-		{},
-		as_dict=1,
-	)
-	for sc in scorecards:
+	"""
+	Refresh the scorecards
+	"""
+	scorecards = frappe.get_list("Supplier Scorecard", fields=["name"], pluck="name", limit_page_length=0)
+	for sc_name in scorecards:
 		# Check to see if any new scorecard periods are created
-		if make_all_scorecards(sc.name) > 0:
+		if make_all_scorecards(sc_name) > 0:
 			# Save the scorecard to update the score and standings
-			frappe.get_doc("Supplier Scorecard", sc.name).save()
+			frappe.get_doc("Supplier Scorecard", sc_name).save()
 
 
 @frappe.whitelist()
@@ -212,25 +199,16 @@ def make_all_scorecards(docname: str):
 
 	while (start_date < todays) and (end_date <= todays):
 		# check to make sure there is no scorecard period already created
-		scorecards = frappe.db.sql(
-			"""
-			SELECT
-				scp.name
-			FROM
-				`tabSupplier Scorecard Period` scp
-			WHERE
-				scp.scorecard = %(sc)s
-				AND scp.docstatus = 1
-				AND (
-					(scp.start_date > %(end_date)s
-					AND scp.end_date < %(start_date)s)
-				OR
-					(scp.start_date < %(end_date)s
-					AND scp.end_date > %(start_date)s))
-			ORDER BY
-				scp.end_date DESC""",
-			{"sc": docname, "start_date": start_date, "end_date": end_date},
-			as_dict=1,
+		scorecards = frappe.get_all(
+			"Supplier Scorecard Period",
+			fields=["name"],
+			filters={
+				"scorecard": docname,
+				"docstatus": 1,
+				"start_date": ["<", end_date],
+				"end_date": [">", start_date],
+			},
+			order_by="end_date desc",
 		)
 		if len(scorecards) == 0:
 			period_card = make_supplier_scorecard(docname, None)

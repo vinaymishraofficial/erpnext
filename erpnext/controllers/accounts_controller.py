@@ -73,6 +73,7 @@ from erpnext.stock.get_item_details import (
 	ItemDetailsCtx,
 	_get_item_tax_template,
 	_get_item_tax_template_from_item_group,
+	get_bin_details,
 	get_conversion_factor,
 	get_item_details,
 	get_item_tax_map,
@@ -329,6 +330,7 @@ class AccountsController(TransactionBase):
 		# Determine if drop ship applies
 		is_drop_ship = self.doctype in {
 			"Purchase Order",
+			"Purchase Invoice",
 			"Sales Order",
 			"Sales Invoice",
 		} and self.is_drop_ship(self.items)
@@ -2898,7 +2900,9 @@ class AccountsController(TransactionBase):
 		advance_entry.party_type = primary_party_type
 		advance_entry.party = primary_party
 		advance_entry.cost_center = self.cost_center or erpnext.get_default_cost_center(self.company)
-		advance_entry.is_advance = "Yes"
+		# For returns the direction is reversed, so this entry cannot be an advance
+		# (JE validation: Supplier advance must be debit, Customer advance must be credit)
+		advance_entry.is_advance = "No" if self.is_return else "Yes"
 
 		# Update dimensions
 		dimensions_dict = frappe._dict()
@@ -2930,35 +2934,26 @@ class AccountsController(TransactionBase):
 				)
 			)
 
-			# Convert outstanding amount from secondary to primary account currency, if needed
+			outstanding_amount = abs(self.outstanding_amount)
+			os_in_default_currency = outstanding_amount * exc_rate_secondary_to_default
+			os_in_primary_currency = outstanding_amount * exc_rate_secondary_to_primary
 
-			os_in_default_currency = self.outstanding_amount * exc_rate_secondary_to_default
-			os_in_primary_currency = self.outstanding_amount * exc_rate_secondary_to_primary
+			# SI normal and PI return → reconciliation is credit; SI return and PI normal → debit
+			reconciliation_is_credit = (self.doctype == "Sales Invoice") != bool(self.is_return)
+			_set_je_amounts(
+				reconcilation_entry, outstanding_amount, os_in_default_currency, reconciliation_is_credit
+			)
+			_set_je_amounts(
+				advance_entry, os_in_primary_currency, os_in_default_currency, not reconciliation_is_credit
+			)
 
-			if self.doctype == "Sales Invoice":
-				# Calculate credit and debit values for reconciliation and advance entries
-				reconcilation_entry.credit_in_account_currency = self.outstanding_amount
-				reconcilation_entry.credit = os_in_default_currency
-
-				advance_entry.debit_in_account_currency = os_in_primary_currency
-				advance_entry.debit = os_in_default_currency
-			else:
-				advance_entry.credit_in_account_currency = os_in_primary_currency
-				advance_entry.credit = os_in_default_currency
-
-				reconcilation_entry.debit_in_account_currency = self.outstanding_amount
-				reconcilation_entry.debit = os_in_default_currency
-
-			# Set exchange rates for entries
 			reconcilation_entry.exchange_rate = exc_rate_secondary_to_default
 			advance_entry.exchange_rate = exc_rate_primary_to_default
 		else:
-			if self.doctype == "Sales Invoice":
-				reconcilation_entry.credit_in_account_currency = self.outstanding_amount
-				advance_entry.debit_in_account_currency = self.outstanding_amount
-			else:
-				advance_entry.credit_in_account_currency = self.outstanding_amount
-				reconcilation_entry.debit_in_account_currency = self.outstanding_amount
+			outstanding_amount = abs(self.outstanding_amount)
+			reconciliation_is_credit = (self.doctype == "Sales Invoice") != bool(self.is_return)
+			_set_je_amounts(reconcilation_entry, outstanding_amount, is_credit=reconciliation_is_credit)
+			_set_je_amounts(advance_entry, outstanding_amount, is_credit=not reconciliation_is_credit)
 
 		jv.multi_currency = multi_currency
 		jv.append("accounts", reconcilation_entry)
@@ -3698,6 +3693,17 @@ def set_child_tax_template_and_map(item, child_item, parent_doc):
 	)
 
 
+def _set_je_amounts(entry, amount, default_amount=None, is_credit=True):
+	if is_credit:
+		entry.credit_in_account_currency = amount
+		if default_amount is not None:
+			entry.credit = default_amount
+	else:
+		entry.debit_in_account_currency = amount
+		if default_amount is not None:
+			entry.debit = default_amount
+
+
 def add_taxes_from_tax_template(child_item, parent_doc, db_insert=True):
 	add_taxes_from_item_tax_template = frappe.get_single_value(
 		"Accounts Settings", "add_taxes_from_item_tax_template"
@@ -3738,7 +3744,7 @@ def set_order_defaults(parent_doctype, parent_doctype_name, child_doctype, child
 	child_item = frappe.new_doc(child_doctype, parent_doc=p_doc, parentfield=child_docname)
 	item = frappe.get_doc("Item", trans_item.get("item_code"))
 
-	for field in ("item_code", "item_name", "description", "item_group"):
+	for field in ("item_code", "item_name", "description", "item_group", "weight_per_unit", "weight_uom"):
 		child_item.update({field: item.get(field)})
 
 	date_fieldname = "delivery_date" if child_doctype == "Sales Order Item" else "schedule_date"
@@ -3748,6 +3754,7 @@ def set_order_defaults(parent_doctype, parent_doctype_name, child_doctype, child
 	child_item.warehouse = get_item_warehouse_(p_doc, item, overwrite_warehouse=True)
 	conversion_factor = flt(get_conversion_factor(item.item_code, child_item.uom).get("conversion_factor"))
 	child_item.conversion_factor = flt(trans_item.get("conversion_factor")) or conversion_factor
+	child_item.update(get_bin_details(child_item.item_code, child_item.warehouse, p_doc.get("company")))
 
 	if child_doctype in ["Purchase Order Item", "Supplier Quotation Item"]:
 		# Initialized value will update in parent validation
@@ -3980,7 +3987,7 @@ def update_child_item_uom_and_weight(child_item, new_data) -> None:
 			flt(new_data.get("conversion_factor"), conv_fac_precision) or conversion_factor
 		)
 
-	if child_item.get("total_weight") and child_item.get("weight_per_unit"):
+	if child_item.get("weight_per_unit"):
 		child_item.total_weight = flt(
 			child_item.weight_per_unit * child_item.qty * child_item.conversion_factor,
 			child_item.precision("total_weight"),
@@ -4045,8 +4052,8 @@ def update_child_qty_rate(
 			)
 
 		qty_limits = {
-			"Sales Order": ("delivered_qty", _("Cannot set quantity less than delivered quantity")),
-			"Purchase Order": ("received_qty", _("Cannot set quantity less than received quantity")),
+			"Sales Order": ("delivered_qty", _("Cannot set quantity less than delivered quantity.")),
+			"Purchase Order": ("received_qty", _("Cannot set quantity less than received quantity.")),
 		}
 
 		if parent_doctype in qty_limits:
@@ -4080,24 +4087,6 @@ def update_child_qty_rate(
 
 				if flt(new_data.get("qty")) < qty_to_check:
 					frappe.throw(_("Cannot reduce quantity than ordered or purchased quantity"))
-
-	def should_update_supplied_items(doc) -> bool:
-		"""Subcontracted PO can allow following changes *after submit*:
-
-		1. Change rate of subcontracting - regardless of other changes.
-		2. Change qty and/or add new items and/or remove items
-		        Exception: Transfer/Consumption is already made, qty change not allowed.
-		"""
-
-		supplied_items_processed = any(
-			item.supplied_qty or item.consumed_qty or item.returned_qty for item in doc.supplied_items
-		)
-
-		update_supplied_items = any_qty_changed or items_added_or_removed or any_conversion_factor_changed
-		if update_supplied_items and supplied_items_processed:
-			frappe.throw(_("Item qty can not be updated as raw materials are already processed."))
-
-		return update_supplied_items
 
 	def validate_fg_item_for_subcontracting(new_data, is_new):
 		if is_new:
@@ -4171,11 +4160,7 @@ def update_child_qty_rate(
 		if flt(child_item.get("qty")) != flt(d.get("qty")):
 			any_qty_changed = True
 
-		if (
-			parent.doctype in ["Sales Order", "Purchase Order"]
-			and parent.is_subcontracted
-			and not parent.get("is_old_subcontracting_flow")
-		):
+		if parent.doctype in ["Sales Order", "Purchase Order"] and parent.is_subcontracted:
 			validate_fg_item_for_subcontracting(d, new_child_flag)
 			child_item.fg_item_qty = flt(d["fg_item_qty"])
 
@@ -4246,18 +4231,12 @@ def update_child_qty_rate(
 		parent.update_receiving_percentage()
 
 		if parent.is_subcontracted:
-			if parent.is_old_subcontracting_flow:
-				if should_update_supplied_items(parent):
-					parent.update_reserved_qty_for_subcontract()
-					parent.create_raw_materials_supplied()
-				parent.save()
-			else:
-				if not parent.can_update_items():
-					frappe.throw(
-						_(
-							"Items cannot be updated as Subcontracting Order is created against the Purchase Order {0}."
-						).format(frappe.bold(parent.name))
-					)
+			if not parent.can_update_items():
+				frappe.throw(
+					_(
+						"Items cannot be updated as Subcontracting Order is created against the Purchase Order {0}."
+					).format(frappe.bold(parent.name))
+				)
 	elif parent_doctype == "Sales Order":  # Sales Order
 		if parent.is_subcontracted and not parent.can_update_items():
 			frappe.throw(
