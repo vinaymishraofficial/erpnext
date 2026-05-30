@@ -337,20 +337,24 @@ class SalesOrder(SellingController):
 					)
 
 		if self.po_no and self.customer and not self.skip_delivery_note:
-			so = frappe.db.sql(
-				"select name from `tabSales Order` \
-				where ifnull(po_no, '') = %s and name != %s and docstatus < 2\
-				and customer = %s",
-				(self.po_no, self.name, self.customer),
+			so = frappe.db.get_value(
+				"Sales Order",
+				filters={
+					"po_no": self.po_no,
+					"name": ["!=", self.name],
+					"docstatus": ["<", 2],
+					"customer": self.customer,
+				},
+				fieldname="name",
 			)
-			if so and so[0][0]:
+			if so:
 				if cint(
 					frappe.get_single_value("Selling Settings", "allow_against_multiple_purchase_orders")
 				):
 					frappe.msgprint(
 						_(
 							"Warning: Sales Order {0} already exists against Customer's Purchase Order {1}"
-						).format(frappe.bold(so[0][0]), frappe.bold(self.po_no)),
+						).format(frappe.bold(so), frappe.bold(self.po_no)),
 						alert=True,
 					)
 				else:
@@ -358,7 +362,7 @@ class SalesOrder(SellingController):
 						_(
 							"Sales Order {0} already exists against Customer's Purchase Order {1}. To allow multiple Sales Orders, Enable {2} in {3}"
 						).format(
-							frappe.bold(so[0][0]),
+							frappe.bold(so),
 							frappe.bold(self.po_no),
 							frappe.bold(
 								_("'Allow Multiple Sales Orders Against a Customer's Purchase Order'")
@@ -368,39 +372,49 @@ class SalesOrder(SellingController):
 					)
 
 	def validate_for_items(self):
-		for d in self.get("items"):
-			# used for production plan
-			d.transaction_date = self.transaction_date
+		item_warehouse_pairs = [
+			(d.item_code, d.warehouse) for d in self.get("items") if d.item_code and d.warehouse
+		]
 
-			tot_avail_qty = frappe.db.sql(
-				"select projected_qty from `tabBin` \
-				where item_code = %s and warehouse = %s",
-				(d.item_code, d.warehouse),
+		bin_data = {}
+		if item_warehouse_pairs:
+			bins = frappe.get_all(
+				"Bin",
+				fields=["item_code", "warehouse", "projected_qty"],
+				filters={"item_code": ["in", [p[0] for p in item_warehouse_pairs]]},
 			)
-			d.projected_qty = tot_avail_qty and flt(tot_avail_qty[0][0]) or 0
+			bin_data = {(b.item_code, b.warehouse): flt(b.projected_qty) for b in bins}
+
+		for d in self.get("items"):
+			d.transaction_date = self.transaction_date
+			d.projected_qty = bin_data.get((d.item_code, d.warehouse), 0.0)
 
 	def product_bundle_has_stock_item(self, product_bundle):
 		"""Returns true if product bundle has stock item"""
-		ret = len(
-			frappe.db.sql(
-				"""select i.name from tabItem i, `tabProduct Bundle Item` pbi
-			where pbi.parent = %s and pbi.item_code = i.name and i.is_stock_item = 1""",
-				product_bundle,
-			)
+		bundle_items = frappe.get_all(
+			"Product Bundle Item", filters={"parent": product_bundle}, pluck="item_code"
 		)
-		return ret
+
+		if not bundle_items:
+			return False
+
+		return frappe.db.exists("Item", {"name": ["in", bundle_items], "is_stock_item": 1}) is not None
 
 	def validate_sales_mntc_quotation(self):
+		quotation_names = [d.prevdoc_docname for d in self.get("items") if d.prevdoc_docname]
+
+		if not quotation_names:
+			return
+
+		valid_quotations = frappe.get_all(
+			"Quotation",
+			filters={"name": ["in", quotation_names], "order_type": self.order_type},
+			pluck="name",
+		)
+
 		for d in self.get("items"):
-			if d.prevdoc_docname:
-				res = frappe.db.sql(
-					"select name from `tabQuotation` where name=%s and order_type = %s",
-					(d.prevdoc_docname, self.order_type),
-				)
-				if not res:
-					frappe.msgprint(
-						_("Quotation {0} not of type {1}").format(d.prevdoc_docname, self.order_type)
-					)
+			if d.prevdoc_docname and d.prevdoc_docname not in valid_quotations:
+				frappe.msgprint(_("Quotation {0} not of type {1}").format(d.prevdoc_docname, self.order_type))
 
 	def validate_delivery_date(self):
 		if self.order_type == "Sales" and not self.skip_delivery_note:
@@ -428,12 +442,10 @@ class SalesOrder(SellingController):
 
 	def validate_proj_cust(self):
 		if self.project and self.customer_name:
-			res = frappe.db.sql(
-				"""select name from `tabProject` where name = %s
-				and (customer = %s or ifnull(customer,'')='')""",
-				(self.project, self.customer),
+			project_has_valid_customer = frappe.db.exists(
+				"Project", {"name": self.project, "customer": ["in", [self.customer, "", None]]}
 			)
-			if not res:
+			if not project_has_valid_customer:
 				frappe.throw(
 					_("Customer {0} does not belong to project {1}").format(self.customer, self.project)
 				)
@@ -474,12 +486,9 @@ class SalesOrder(SellingController):
 			self.validate_rate_with_reference_doc([["Quotation", "prevdoc_docname", "quotation_item"]])
 
 	def update_enquiry_status(self, prevdoc, flag):
-		enq = frappe.db.sql(
-			"select t2.prevdoc_docname from `tabQuotation` t1, `tabQuotation Item` t2 where t2.parent = t1.name and t1.name=%s",
-			prevdoc,
-		)
-		if enq:
-			frappe.db.sql("update `tabOpportunity` set status = %s where name=%s", (flag, enq[0][0]))
+		opportunity_name = frappe.db.get_value("Quotation Item", {"parent": prevdoc}, "prevdoc_docname")
+		if opportunity_name:
+			frappe.db.set_value("Opportunity", opportunity_name, "status", flag)
 
 	def update_prevdoc_status(self, flag=None):
 		for quotation in set(d.prevdoc_docname for d in self.get("items")):
@@ -580,13 +589,12 @@ class SalesOrder(SellingController):
 			check_credit_limit(self.customer, self.company)
 
 	def check_nextdoc_docstatus(self):
-		linked_invoices = frappe.db.sql_list(
-			"""select distinct t1.name
-			from `tabSales Invoice` t1,`tabSales Invoice Item` t2
-			where t1.name = t2.parent and t2.sales_order = %s and t1.docstatus = 0""",
-			self.name,
+		linked_invoices = frappe.get_all(
+			"Sales Invoice Item",
+			filters={"sales_order": self.name, "docstatus": 0},
+			pluck="parent",
+			distinct=True,
 		)
-
 		if linked_invoices:
 			linked_invoices = [get_link_to_form("Sales Invoice", si) for si in linked_invoices]
 			frappe.throw(
@@ -597,8 +605,7 @@ class SalesOrder(SellingController):
 
 	def check_modified_date(self):
 		mod_db = frappe.db.get_value("Sales Order", self.name, "modified")
-		date_diff = frappe.db.sql(f"select TIMEDIFF('{mod_db}', '{cstr(self.modified)}')")
-		if date_diff and date_diff[0][0]:
+		if mod_db and cstr(mod_db) != cstr(self.modified):
 			frappe.throw(_("{0} {1} has been modified. Please refresh.").format(self.doctype, self.name))
 
 	def update_status(self, status):
@@ -849,9 +856,13 @@ class SalesOrder(SellingController):
 
 		packed_items = []
 		if items_details:
-			for idx, item in enumerate(items_details):
+			for item in items_details:
 				if not frappe.db.exists("Sales Order Item", item.get("sales_order_item")):
-					packed_items.append(items_details.pop(idx))
+					item["qty"] = item.pop("qty_to_reserve")
+					packed_items.append(item)
+
+			for item in packed_items:
+				items_details.remove(item)
 
 		sre_count = 0
 		if items_details != []:
@@ -862,7 +873,13 @@ class SalesOrder(SellingController):
 				notify=notify,
 			)
 
-		if items := packed_items or [item for item in self.packed_items if item.reserve_stock]:
+		items = []
+		if packed_items:
+			items = packed_items
+		elif not items_details:
+			items = [item for item in self.packed_items if item.reserve_stock]
+
+		if items:
 			from erpnext.stock.doctype.stock_reservation_entry.stock_reservation_entry import StockReservation
 
 			stock_reservation = StockReservation(doc=self, items=items)
@@ -1596,11 +1613,8 @@ def make_sales_invoice(
 
 @frappe.whitelist()
 def make_maintenance_schedule(source_name: str, target_doc: str | Document | None = None):
-	maint_schedule = frappe.db.sql(
-		"""select t1.name
-		from `tabMaintenance Schedule` t1, `tabMaintenance Schedule Item` t2
-		where t2.parent=t1.name and t2.sales_order=%s and t1.docstatus=1""",
-		source_name,
+	maint_schedule = frappe.db.exists(
+		"Maintenance Schedule Item", {"sales_order": source_name, "docstatus": 1}
 	)
 
 	if not maint_schedule:
@@ -1622,15 +1636,20 @@ def make_maintenance_schedule(source_name: str, target_doc: str | Document | Non
 
 @frappe.whitelist()
 def make_maintenance_visit(source_name: str, target_doc: str | Document | None = None):
-	visit = frappe.db.sql(
-		"""select t1.name
-		from `tabMaintenance Visit` t1, `tabMaintenance Visit Purpose` t2
-		where t2.parent=t1.name and t2.prevdoc_docname=%s
-		and t1.docstatus=1 and t1.completion_status='Fully Completed'""",
-		source_name,
+	MaintenanceVisit = frappe.qb.DocType("Maintenance Visit")
+	MaintenanceVisitPurpose = frappe.qb.DocType("Maintenance Visit Purpose")
+
+	query = (
+		frappe.qb.from_(MaintenanceVisit)
+		.join(MaintenanceVisitPurpose)
+		.on(MaintenanceVisitPurpose.parent == MaintenanceVisit.name)
+		.select(MaintenanceVisit.name)
+		.where(MaintenanceVisitPurpose.prevdoc_docname == source_name)
+		.where(MaintenanceVisit.docstatus == 1)
+		.where(MaintenanceVisit.completion_status == "Fully Completed")
 	)
 
-	if not visit:
+	if not query.run():
 		doclist = get_mapped_doc(
 			"Sales Order",
 			source_name,
@@ -1655,32 +1674,39 @@ def get_events(start: str, end: str, filters: str | dict | None = None):
 	:param end: End date-time.
 	:param filters: Filters (JSON).
 	"""
-	from frappe.desk.calendar import get_event_conditions
 
-	conditions = get_event_conditions("Sales Order", filters)
+	SalesOrder = frappe.qb.DocType("Sales Order")
+	SalesOrderItem = frappe.qb.DocType("Sales Order Item")
 
-	data = frappe.db.sql(
-		f"""
-		select
-			distinct `tabSales Order`.name, `tabSales Order`.customer_name, `tabSales Order`.status,
-			`tabSales Order`.delivery_status, `tabSales Order`.billing_status,
-			`tabSales Order Item`.delivery_date
-		from
-			`tabSales Order`, `tabSales Order Item`
-		where `tabSales Order`.name = `tabSales Order Item`.parent
-			and `tabSales Order`.skip_delivery_note = 0
-			and (ifnull(`tabSales Order Item`.delivery_date, '0000-00-00')!= '0000-00-00') \
-			and (`tabSales Order Item`.delivery_date between %(start)s and %(end)s)
-			and `tabSales Order`.docstatus < 2
-			{conditions}
-		""",
-		{"start": start, "end": end},
-		as_dict=True,
-		update={
-			"allDay": 0,
-			"convertToUserTz": 0,
-		},
+	query = (
+		frappe.get_query("Sales Order", filters=filters, ignore_permissions=False)
+		.join(SalesOrderItem)
+		.on(SalesOrder.name == SalesOrderItem.parent)
+		.select(
+			SalesOrder.name,
+			SalesOrder.customer_name,
+			SalesOrder.status,
+			SalesOrder.delivery_status,
+			SalesOrder.billing_status,
+			SalesOrderItem.delivery_date,
+		)
+		.distinct()
+		.where(SalesOrder.skip_delivery_note == 0)
+		.where(SalesOrder.docstatus < 2)
+		.where(SalesOrderItem.delivery_date.between(start, end))
+		.where(SalesOrderItem.delivery_date.isnotnull())
 	)
+
+	data = query.run(as_dict=True)
+
+	for row in data:
+		row.update(
+			{
+				"allDay": 0,
+				"convertToUserTz": 0,
+			}
+		)
+
 	return data
 
 
