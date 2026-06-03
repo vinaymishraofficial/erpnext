@@ -29,7 +29,7 @@ from erpnext.accounts.doctype.repost_accounting_ledger.repost_accounting_ledger 
 )
 from erpnext.accounts.doctype.tax_withholding_entry.tax_withholding_entry import SalesTaxWithholding
 from erpnext.accounts.general_ledger import get_round_off_account_and_cost_center
-from erpnext.accounts.party import get_due_date, get_party_account, get_party_details
+from erpnext.accounts.party import _get_party_details, get_due_date, get_party_account
 from erpnext.accounts.utils import (
 	get_account_currency,
 	update_voucher_outstanding,
@@ -2218,28 +2218,29 @@ class SalesInvoice(SellingController):
 
 	# valdite the redemption and then delete the loyalty points earned on cancel of the invoice
 	def delete_loyalty_point_entry(self):
-		lp_entry = frappe.db.sql(
-			"select name from `tabLoyalty Point Entry` where invoice=%s", (self.name), as_dict=1
+		lp_entry = frappe.db.get_all(
+			"Loyalty Point Entry", filters={"invoice": self.name, "loyalty_points": (">", 0)}, fields=["name"]
 		)
 
 		if not lp_entry:
 			return
-		against_lp_entry = frappe.db.sql(
-			"""select name, invoice from `tabLoyalty Point Entry`
-			where redeem_against=%s""",
-			(lp_entry[0].name),
-			as_dict=1,
+
+		against_lp_entry = frappe.db.get_all(
+			"Loyalty Point Entry",
+			filters={"redeem_against": lp_entry[0].name},
+			fields=["name", "invoice"],
 		)
+
 		if against_lp_entry:
 			invoice_list = ", ".join([d.invoice for d in against_lp_entry])
 			frappe.throw(
 				_(
-					"""{} can't be cancelled since the Loyalty Points earned has been redeemed. First cancel the {} No {}"""
+					"{} can't be cancelled since the Loyalty Points earned has been redeemed. "
+					"First cancel the {} No {}"
 				).format(self.doctype, self.doctype, invoice_list)
 			)
 		else:
-			frappe.db.sql("""delete from `tabLoyalty Point Entry` where invoice=%s""", (self.name))
-			# Set loyalty program
+			frappe.db.delete("Loyalty Point Entry", filters={"invoice": self.name})
 			self.set_loyalty_program_tier()
 
 	def set_loyalty_program_tier(self):
@@ -3042,7 +3043,7 @@ def update_taxes(
 	master_doctype=None,
 ):
 	# Update Party Details
-	party_details = get_party_details(
+	party_details = _get_party_details(
 		party=party,
 		party_type=party_type,
 		company=company,
@@ -3182,14 +3183,22 @@ def get_mode_of_payments_info(mode_of_payments, company):
 
 
 def get_mode_of_payment_info(mode_of_payment, company):
-	return frappe.db.sql(
-		"""
-		select mpa.default_account, mpa.parent, mp.type as type
-		from `tabMode of Payment Account` mpa,`tabMode of Payment` mp
-		where mpa.parent = mp.name and mpa.company = %s and mp.enabled = 1 and mp.name = %s""",
-		(company, mode_of_payment),
-		as_dict=1,
+	ModeOfPaymentAccount = frappe.qb.DocType("Mode of Payment Account")
+	ModeOfPayment = frappe.qb.DocType("Mode of Payment")
+
+	query = (
+		frappe.qb.from_(ModeOfPayment)
+		.join(ModeOfPaymentAccount)
+		.on(ModeOfPaymentAccount.parent == ModeOfPayment.name)
+		.select(
+			ModeOfPaymentAccount.default_account, ModeOfPaymentAccount.parent, ModeOfPayment.type.as_("type")
+		)
+		.where(ModeOfPaymentAccount.company == company)
+		.where(ModeOfPayment.enabled == 1)
+		.where(ModeOfPayment.name == mode_of_payment)
 	)
+
+	return query.run(as_dict=1)
 
 
 @frappe.whitelist()
