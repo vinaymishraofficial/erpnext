@@ -280,6 +280,16 @@ frappe.ui.form.on("Job Card", {
 			pending_qty = frm.doc.pending_qty;
 		}
 
+		// Cap the suggested qty at what the previous operation(s) in the
+		// sequence have actually completed/manufactured so far
+		// (get_max_completable_qty, set on load). Without this, the dialog
+		// can offer more than sequence validation will actually allow on
+		// submit -- see issue #56934.
+		const max_completable_qty = frm.doc.__onload && frm.doc.__onload.max_completable_qty;
+		if (max_completable_qty !== null && max_completable_qty !== undefined) {
+			pending_qty = Math.min(pending_qty, Math.max(0, flt(max_completable_qty)));
+		}
+
 		const fields = [
 			{
 				fieldtype: "Float",

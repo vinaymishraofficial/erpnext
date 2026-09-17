@@ -530,6 +530,23 @@ frappe.ui.form.on("Work Order", {
 			if (data.completed_qty + data.process_loss_qty != frm.doc.qty) {
 				pending_qty = frm.doc.qty - flt(data.completed_qty) - flt(data.process_loss_qty);
 
+				// Cap the suggested qty at what earlier operations in the sequence
+				// have actually completed so far. Without this, a downstream
+				// operation is offered the full Work Order qty even when an
+				// upstream operation only finished part of it, and submit-time
+				// sequence validation (OperationSequenceError) rejects the
+				// difference -- see issue #56934.
+				if (data.sequence_id) {
+					const previous_ops = frm.doc.operations.filter(
+						(op) => op.sequence_id && op.sequence_id < data.sequence_id
+					);
+					if (previous_ops.length) {
+						const min_completed = Math.min(...previous_ops.map((op) => flt(op.completed_qty)));
+						const upstream_cap = Math.max(0, min_completed - flt(data.completed_qty));
+						pending_qty = Math.min(pending_qty, upstream_cap);
+					}
+				}
+
 				if (pending_qty) {
 					dialog.fields_dict.operations.df.data.push({
 						__checked: 1,
