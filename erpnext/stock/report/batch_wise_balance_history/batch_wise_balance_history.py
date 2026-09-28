@@ -147,6 +147,11 @@ def get_stock_ledger_entries_for_batch_no(filters):
 			& (sle.batch_no != "")
 			& (sle.posting_datetime < posting_datetime)
 		)
+		# This report also adds a separate Serial and Batch Bundle path for the same batch
+		# (get_stock_ledger_entries_for_batch_bundle). A row that has both `batch_no` and a
+		# linked bundle set would otherwise be summed here AND from the bundle side, doubling
+		# its qty in the report. Skipping bundle-linked rows here keeps each row counted once.
+		.where((sle.serial_and_batch_bundle.isnull()) | (sle.serial_and_batch_bundle == ""))
 		.groupby(sle.voucher_no, sle.batch_no, sle.item_code, sle.warehouse)
 	)
 

@@ -149,6 +149,14 @@ class DeprecatedBatchNoValuation:
 				& (sle.batch_no.isnotnull())
 				& (sle.is_cancelled == 0)
 			)
+			# available_qty for a batch is the Serial and Batch Entry sum PLUS this SLE.batch_no
+			# sum. A row linked to a Serial and Batch Bundle is already counted through the
+			# Serial and Batch Entry side, so counting its `batch_no` here too would count that
+			# row's qty twice. In one real case this made a batch that actually had 19 remaining
+			# look like it had 29, so a manufacture entry was allowed to consume more than was
+			# really available and submit later failed with a negative stock error. Skipping
+			# bundle-linked rows here keeps each row's qty counted on exactly one side.
+			.where((sle.serial_and_batch_bundle.isnull()) | (sle.serial_and_batch_bundle == ""))
 			.for_update()
 			.groupby(sle.batch_no)
 		)

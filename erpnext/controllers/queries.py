@@ -503,6 +503,14 @@ def get_batches_from_stock_ledger_entries(searchfields, txt, filters, start=0, p
 			& (batch_table.disabled == 0)
 			& (stock_ledger_entry.batch_no.isnotnull())
 		)
+		# Skip rows that also carry a linked Serial and Batch Bundle. This row's `batch_no`
+		# column and its bundle can both describe the same qty for the same batch, so summing
+		# `actual_qty` here while a bundle is also linked would count that qty twice and show
+		# more available batch qty than the warehouse actually has.
+		.where(
+			(stock_ledger_entry.serial_and_batch_bundle.isnull())
+			| (stock_ledger_entry.serial_and_batch_bundle == "")
+		)
 		.groupby(stock_ledger_entry.batch_no, stock_ledger_entry.warehouse)
 		.having(Sum(stock_ledger_entry.actual_qty) != 0)
 		.offset(start)

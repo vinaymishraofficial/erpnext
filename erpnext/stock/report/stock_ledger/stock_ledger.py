@@ -619,32 +619,45 @@ def get_sle_conditions(filters):
 
 
 def get_opening_balance_from_batch(filters, columns, sl_entries):
-	query_filters = {
-		"batch_no": filters.batch_no,
-		"docstatus": 1,
-		"is_cancelled": 0,
-		"posting_date": ("<", filters.from_date),
-		"company": filters.company,
-	}
+	table = frappe.qb.DocType("Stock Ledger Entry")
+
+	# A Stock Ledger Entry can be linked to a Serial and Batch Bundle AND still have its own
+	# `batch_no` column set to the same batch. Below, this function sums `actual_qty` straight
+	# off this table (this query), then separately sums the same batch's qty again through the
+	# bundle's Serial and Batch Entry rows (the second query further down). If a row with both
+	# fields set were included here, its qty would be added once here and once more from the
+	# bundle side, so the opening balance would come out roughly double the real qty. Excluding
+	# bundle-linked rows here keeps each row's qty counted on exactly one side.
+	direct_query = (
+		frappe.qb.from_(table)
+		.select(
+			Sum(table.actual_qty).as_("qty_after_transaction"),
+			Sum(table.stock_value_difference).as_("stock_value"),
+		)
+		.where(
+			(table.batch_no == filters.batch_no)
+			& (table.docstatus == 1)
+			& (table.is_cancelled == 0)
+			& (table.posting_date < filters.from_date)
+			& (table.company == filters.company)
+		)
+		.where((table.serial_and_batch_bundle.isnull()) | (table.serial_and_batch_bundle == ""))
+	)
 
 	for fields in ["item_code", "warehouse"]:
 		if value := filters.get(fields):
-			query_filters[fields] = ("in", value)
+			if isinstance(value, list | tuple):
+				direct_query = direct_query.where(table[fields].isin(value))
+			else:
+				direct_query = direct_query.where(table[fields] == value)
 
-	opening_data = frappe.get_all(
-		"Stock Ledger Entry",
-		fields=[
-			{"SUM": "actual_qty", "as": "qty_after_transaction"},
-			{"SUM": "stock_value_difference", "as": "stock_value"},
-		],
-		filters=query_filters,
-	)[0]
+	direct_data = direct_query.run(as_dict=True)
+	opening_data = direct_data[0] if direct_data else frappe._dict()
 
 	for field in ["qty_after_transaction", "stock_value", "valuation_rate"]:
 		if opening_data.get(field) is None:
 			opening_data[field] = 0.0
 
-	table = frappe.qb.DocType("Stock Ledger Entry")
 	sabb_table = frappe.qb.DocType("Serial and Batch Entry")
 	query = (
 		frappe.qb.from_(table)

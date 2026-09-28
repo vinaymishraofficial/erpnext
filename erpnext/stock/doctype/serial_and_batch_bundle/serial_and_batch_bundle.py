@@ -3530,6 +3530,15 @@ def get_stock_ledgers_batches(kwargs):
 			batch_table.expiry_date,
 		)
 		.where((stock_ledger_entry.is_cancelled == 0) & (stock_ledger_entry.batch_no.isnotnull()))
+		# A Stock Ledger Entry can record its batch qty in TWO places at once: this row's own
+		# `batch_no` column, AND (separately) a linked Serial and Batch Bundle document that also
+		# lists the same batch. When a row has both set, summing plain `batch_no` here already
+		# counts that qty once, so it must not be counted again from the bundle side, or the total
+		# comes out double. Skipping rows that point at a bundle keeps each qty counted exactly once.
+		.where(
+			(stock_ledger_entry.serial_and_batch_bundle.isnull())
+			| (stock_ledger_entry.serial_and_batch_bundle == "")
+		)
 		.groupby(stock_ledger_entry.batch_no, stock_ledger_entry.warehouse)
 	)
 
