@@ -721,10 +721,105 @@ class ManufactureStockEntry(BaseManufactureStockEntry):
 
 		self.add_materials_from_transfer()
 		self._consumption_entries = self.get_consumption_entries()
-		if not self._consumption_entries:
+		if self._consumption_entries:
+			self.remove_consumed_materials_from_available()
+
+		self.exclude_other_work_orders_reserved_stock()
+
+	def exclude_other_work_orders_reserved_stock(self):
+		"""Why this function exists (in plain terms):
+
+		self.available_materials tells this Work Order "here is what you have already
+		transferred and not yet used, batch by batch". But it is built only by looking
+		at THIS Work Order's own transfer and consumption entries. It never checks
+		whether someone else has a Stock Reservation Entry (a lock that says "these
+		units of this batch are promised to this other Work Order / Sales Order /
+		Production Plan, don't let anyone else take them") on the same batch.
+
+		So today, if Work Order A has reserved 12 units of Batch X for itself, and Work
+		Order B separately transferred 15 units of that same Batch X for its own use,
+		self.available_materials for Work Order B says "you have 15 units free" -- even
+		though only 3 of those 15 are actually free once A's reservation is honoured.
+		Work Order B then builds its Stock Entry using all 15 units, and it FAILS at
+		submit time with a "Reserved Batch Conflict" error, because the guard that runs
+		at submit time (validate_reserved_batches) does check reservations properly.
+
+		Result: the failure only shows up at the very last step (Submit), after the
+		user has already filled in the whole entry, instead of the entry being built
+		correctly from the start.
+
+		This function fixes that by re-checking, batch by batch, how much of what's in
+		self.available_materials is actually still reserved by someone else, and
+		subtracting that amount. So Work Order B above would now correctly be told "3
+		units free", not 15.
+
+		Note: ERPNext already does this correctly in one other place --
+		get_auto_batch_nos() (used when picking batches for a Sales Order / Delivery
+		Note) already skips batches reserved by others, using a helper called
+		get_reserved_batches_for_sre(). This function does the same thing, just for
+		the Work Order transfer/consumption path, which never had this check.
+		"""
+		if not self.available_materials or not frappe.db.get_single_value(
+			"Stock Settings", "enable_stock_reservation"
+		):
 			return
 
-		self.remove_consumed_materials_from_available()
+		item_codes = list({key[0] for key in self.available_materials})
+		warehouses = list({key[1] for key in self.available_materials if key[1]})
+		if not item_codes or not warehouses:
+			return
+
+		# For every (item, warehouse, batch) combination we care about, add up how much
+		# of it is still reserved (reserved_qty minus what's already been delivered) by
+		# ANY Stock Reservation Entry that does NOT belong to this same Work Order --
+		# we only want to exclude what belongs to someone else, not our own reservation.
+		sre = frappe.qb.DocType("Stock Reservation Entry")
+		sb_entry = frappe.qb.DocType("Serial and Batch Entry")
+		reserved_elsewhere = (
+			frappe.qb.from_(sre)
+			.inner_join(sb_entry)
+			.on(sre.name == sb_entry.parent)
+			.select(
+				sre.item_code,
+				sre.warehouse,
+				sb_entry.batch_no,
+				(Sum(sb_entry.qty - sb_entry.delivered_qty)).as_("qty"),
+			)
+			.where(
+				(sre.docstatus == 1)
+				& (sre.item_code.isin(item_codes))
+				& (sre.warehouse.isin(warehouses))
+				& (sre.delivered_qty < sre.reserved_qty)
+				& (sre.reservation_based_on == "Serial and Batch")
+				& ((sre.voucher_type != "Work Order") | (sre.voucher_no != self.doc.work_order))
+			)
+			.groupby(sre.item_code, sre.warehouse, sb_entry.batch_no)
+		).run(as_dict=True)
+
+		# Now subtract each reserved-by-someone-else amount from what this Work Order
+		# thinks it has available, for that same item/warehouse/batch.
+		for row in reserved_elsewhere:
+			matching_buckets = [
+				bucket
+				for key, bucket in self.available_materials.items()
+				if key[0] == row.item_code and key[1] == row.warehouse and bucket.batches
+			]
+			if not matching_buckets:
+				continue
+
+			remaining = flt(row.qty)
+			for bucket in matching_buckets:
+				if remaining <= 0:
+					break
+
+				available_in_batch = flt(bucket.batches.get(row.batch_no))
+				if available_in_batch <= 0:
+					continue
+
+				deduct = min(available_in_batch, remaining)
+				bucket.batches[row.batch_no] -= deduct
+				bucket.qty -= deduct
+				remaining -= deduct
 
 	def return_available_materials_in_source_wh(self):
 		for row in self.doc.items:
