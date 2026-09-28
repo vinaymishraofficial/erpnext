@@ -427,7 +427,9 @@ class StockLedgerEntry(Document):
 						"You are not authorized to make/edit Stock Transactions for Item {0} under warehouse {1} before this time."
 					).format(frappe.bold(self.item_code), frappe.bold(self.warehouse))
 
-					msg += "<br><br>" + _("Please contact any of the following users to {} this transaction.")
+					msg += "<br><br>" + _(
+						"Please contact any of the following users to {0} this transaction."
+					).format(_("authorize"))
 					msg += "<br>" + "<br>".join(authorized_users)
 					frappe.throw(msg, BackDatedStockTransaction, title=_("Backdated Stock Entry"))
 
