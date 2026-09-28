@@ -1134,6 +1134,58 @@ class StockReservation:
 				alert=True,
 			)
 
+	def _has_active_reservation(
+		self,
+		voucher_type: str,
+		voucher_no: str,
+		voucher_detail_no: str,
+		from_voucher_type: str | None = None,
+		from_voucher_no: str | None = None,
+		from_voucher_detail_no: str | None = None,
+	) -> bool:
+		"""Whether an active Stock Reservation Entry already covers this exact
+		contribution, so make_stock_reservation_entries() can skip creating a
+		duplicate for it.
+
+		Why this check exists: nothing here previously stopped
+		make_stock_reservation_entries() from being called more than once for
+		the same row (e.g. a Work Order's reservation step re-running) and
+		creating a brand new Stock Reservation Entry each time, re-reserving
+		material that was already reserved. Left unchecked, this quietly
+		inflates a batch's total reserved quantity every time it happens, and
+		that inflated total eventually makes some unrelated voucher's own,
+		perfectly valid consumption get rejected with "Reserved Batch
+		Conflict" -- for material that was never really double-booked in the
+		first place, just double-counted.
+
+		Why voucher_detail_no alone is not enough: a Work Order can
+		legitimately need more than one Stock Reservation Entry for the same
+		required-items row over time -- each new partial Material Transfer
+		for that row calls this again with a fresh amount to reserve, and
+		that is a real, new reservation, not a duplicate of the first one.
+		Skipping every call after the first would leave the Work Order
+		permanently under-reserved as more material keeps arriving.
+		from_voucher_type/from_voucher_no/from_voucher_detail_no identify the
+		specific source (e.g. which Stock Entry) this particular contribution
+		came from, so including them distinguishes "this exact contribution
+		was already reserved" from "a new contribution needs its own new
+		reservation". Callers that don't have that concept (no from_voucher_no
+		/ from_voucher_detail_no) fall back to the voucher_detail_no-only
+		check.
+		"""
+		filters = {
+			"voucher_type": voucher_type,
+			"voucher_no": voucher_no,
+			"voucher_detail_no": voucher_detail_no,
+			"docstatus": 1,
+			"status": ("in", ("Reserved", "Partially Reserved")),
+		}
+		if from_voucher_no or from_voucher_detail_no:
+			filters["from_voucher_type"] = from_voucher_type
+			filters["from_voucher_no"] = from_voucher_no
+			filters["from_voucher_detail_no"] = from_voucher_detail_no
+		return bool(frappe.db.exists("Stock Reservation Entry", filters))
+
 	def make_stock_reservation_entries(self):
 		items = self.items
 		if not items:
@@ -1143,9 +1195,24 @@ class StockReservation:
 
 		is_sre_created = False
 		for item in items:
-			sre = frappe.new_doc("Stock Reservation Entry")
 			if isinstance(item, dict):
 				item = frappe._dict(item)
+
+			voucher_type = item.get("voucher_type") or self.doc.doctype
+			voucher_no = item.get("voucher_no") or self.doc.name
+			voucher_detail_no = item.get(child_doctype) or item.get("name") or item.get("voucher_detail_no")
+
+			if voucher_detail_no and self._has_active_reservation(
+				voucher_type,
+				voucher_no,
+				voucher_detail_no,
+				item.get("from_voucher_type"),
+				item.get("from_voucher_no"),
+				item.get("from_voucher_detail_no"),
+			):
+				continue
+
+			sre = frappe.new_doc("Stock Reservation Entry")
 
 			item_code = item.get("item_code") or item.get("production_item")
 
