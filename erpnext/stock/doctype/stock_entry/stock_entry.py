@@ -4802,7 +4802,90 @@ def get_available_materials(work_order, stock_entry_doc=None) -> dict:
 					if serial_no in item_data.serial_nos:
 						item_data.serial_nos.remove(serial_no)
 
+	exclude_other_work_orders_reserved_stock(available_materials, work_order)
+
 	return available_materials
+
+
+def exclude_other_work_orders_reserved_stock(available_materials, work_order):
+	"""Why this function exists (in plain terms):
+
+	get_available_materials() tells a Work Order "here is what you have already
+	transferred and not yet used, batch by batch". But it builds this answer only by
+	looking at THIS Work Order's own transfer and consumption entries. It never checks
+	whether someone else has a Stock Reservation Entry (a lock that says "these units
+	of this batch are promised to this other Work Order / Sales Order / Production
+	Plan, don't let anyone else take them") on the same batch.
+
+	So today, if Work Order A has reserved 12 units of Batch X for itself, and Work
+	Order B separately transferred 15 units of that same Batch X for its own use, then
+	get_available_materials() for Work Order B says "you have 15 units free" -- even
+	though only 3 of those 15 are actually free once A's reservation is honoured. Work
+	Order B then builds its Stock Entry using all 15 units, and it FAILS at submit time
+	with a "Reserved Batch Conflict" error, because the guard that runs at submit time
+	(validate_reserved_batches) does check reservations properly.
+
+	Result: the failure only shows up at the very last step (Submit), after the user
+	has already filled in the whole entry, instead of the entry being built correctly
+	from the start.
+
+	This function fixes that by re-checking, batch by batch, how much of what
+	get_available_materials() found is actually still reserved by someone else, and
+	subtracting that amount. So Work Order B above would now correctly be told "3
+	units free", not 15.
+
+	Note: ERPNext already does this correctly in one other place -- get_auto_batch_nos()
+	(used when picking batches for a Sales Order / Delivery Note) already skips batches
+	reserved by others, using a helper called get_reserved_batches_for_sre(). This
+	function does the same thing, just for the Work Order transfer/consumption path,
+	which never had this check.
+	"""
+	if not available_materials or not frappe.db.get_single_value(
+		"Stock Settings", "enable_stock_reservation"
+	):
+		return
+
+	item_codes = list({key[0] for key in available_materials})
+	warehouses = list({key[1] for key in available_materials if key[1]})
+	if not item_codes or not warehouses:
+		return
+
+	# For every (item, warehouse, batch) combination we care about, add up how much of
+	# it is still reserved (reserved_qty minus what's already been delivered) by ANY
+	# Stock Reservation Entry that does NOT belong to this same Work Order -- we only
+	# want to exclude what belongs to someone else, not our own reservation.
+	sre = frappe.qb.DocType("Stock Reservation Entry")
+	sb_entry = frappe.qb.DocType("Serial and Batch Entry")
+	reserved_elsewhere = (
+		frappe.qb.from_(sre)
+		.inner_join(sb_entry)
+		.on(sre.name == sb_entry.parent)
+		.select(
+			sre.item_code,
+			sre.warehouse,
+			sb_entry.batch_no,
+			(Sum(sb_entry.qty - sb_entry.delivered_qty)).as_("qty"),
+		)
+		.where(
+			(sre.docstatus == 1)
+			& (sre.item_code.isin(item_codes))
+			& (sre.warehouse.isin(warehouses))
+			& (sre.delivered_qty < sre.reserved_qty)
+			& (sre.reservation_based_on == "Serial and Batch")
+			& ((sre.voucher_type != "Work Order") | (sre.voucher_no != work_order))
+		)
+		.groupby(sre.item_code, sre.warehouse, sb_entry.batch_no)
+	).run(as_dict=True)
+
+	# Now subtract each reserved-by-someone-else amount from what this Work Order
+	# thinks it has available, for that same item/warehouse/batch.
+	for row in reserved_elsewhere:
+		item_data = available_materials.get((row.item_code, row.warehouse))
+		if not item_data:
+			continue
+
+		item_data.batch_details[row.batch_no] -= row.qty
+		item_data.qty -= row.qty
 
 
 def get_stock_entry_data(work_order, stock_entry_doc=None):

@@ -3859,6 +3859,84 @@ class TestWorkOrder(ERPNextTestSuite):
 
 		self.assertRaises(frappe.ValidationError, transfer_entry.submit)
 
+	def test_get_available_materials_excludes_other_work_orders_reserved_stock(self):
+		"""get_available_materials() must not report a batch as fully available to one
+		Work Order's raw-material consumption when another voucher's Stock Reservation
+		Entry has an undelivered claim on that same batch/warehouse.
+
+		Without this, add_transfered_raw_materials_in_items() (used by "Get Items" on a
+		Manufacture Stock Entry) can pick a batch qty that get_auto_batch_nos() would
+		have excluded, and the entry then fails at submit with "Reserved Batch Conflict"
+		instead of drawing the shortfall from a genuinely unclaimed batch.
+		"""
+		from erpnext.stock.doctype.stock_entry.stock_entry import get_available_materials
+		from erpnext.stock.doctype.stock_entry.stock_entry_utils import (
+			make_stock_entry as make_stock_entry_test_record,
+		)
+
+		production_item = "Test Available Materials FG"
+		rm_item = "Test Available Materials RM"
+		warehouse = "Stores - _TC"
+
+		make_item(production_item, {"is_stock_item": 1})
+		make_item(
+			rm_item,
+			{
+				"is_stock_item": 1,
+				"has_batch_no": 1,
+				"batch_number_series": "TST-BATCH-AVAIL-.###",
+				"create_new_batch": 1,
+			},
+		)
+
+		bom = make_bom(
+			item=production_item,
+			source_warehouse=warehouse,
+			raw_materials=[rm_item],
+			do_not_submit=True,
+		)
+
+		for row in bom.exploded_items:
+			make_stock_entry_test_record(
+				item_code=row.item_code,
+				target=warehouse,
+				qty=20,
+				basic_rate=100,
+			)
+
+		batch_no = frappe.db.get_value("Batch", {"item": rm_item}, "name")
+
+		# Reserves 12 of the 20 units for a Work Order that never transfers them out.
+		make_wo_order_test_record(
+			item=production_item,
+			qty=12,
+			reserve_stock=1,
+			source_warehouse=warehouse,
+		)
+
+		# A second, unrelated Work Order transfers 15 units from the same shared batch.
+		# 15 (its own transfer) + 12 (the other WO's reservation) = 27, more than the
+		# 20 truly in stock, so at most 8 of its own 15 can safely be treated as free.
+		wo_consuming = make_wo_order_test_record(
+			item=production_item,
+			qty=15,
+			source_warehouse=warehouse,
+			wip_warehouse=warehouse,
+		)
+
+		transfer_entry = frappe.get_doc(
+			make_stock_entry(wo_consuming.name, "Material Transfer for Manufacture", 15)
+		)
+		transfer_entry.insert()
+		transfer_entry.submit()
+
+		available_materials = get_available_materials(wo_consuming.name)
+		item_data = available_materials.get((rm_item, warehouse))
+
+		self.assertIsNotNone(item_data)
+		self.assertEqual(flt(item_data.batch_details.get(batch_no)), 3.0)
+		self.assertEqual(flt(item_data.qty), 3.0)
+
 	@ERPNextTestSuite.change_settings(
 		"Stock Settings",
 		{"enable_stock_reservation": 1, "allow_partial_reservation": 1},
