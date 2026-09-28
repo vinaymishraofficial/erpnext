@@ -4771,8 +4771,14 @@ def get_available_materials(work_order, stock_entry_doc=None) -> dict:
 				item_data.batch_details[row.batch_no] += row.qty
 
 			elif row.batch_nos:
+				# row.batch_nos can come from more than one source and isn't
+				# consistently signed: some sources give the raw signed ledger
+				# qty (negative for an outward-matched row, positive for
+				# inward), others always give a positive magnitude. Normalize
+				# with abs() so this always adds a positive contribution here,
+				# regardless of which source populated it.
 				for batch_no, qty in row.batch_nos.items():
-					item_data.batch_details[batch_no] += qty
+					item_data.batch_details[batch_no] += abs(flt(qty))
 
 			if row.serial_no:
 				item_data.serial_nos.extend(get_serial_nos(row.serial_no))
@@ -4789,8 +4795,13 @@ def get_available_materials(work_order, stock_entry_doc=None) -> dict:
 				item_data.batch_details[row.batch_no] -= row.qty
 
 			elif row.batch_nos:
+				# See the add-branch comment above: normalize with abs() the
+				# same way, and subtract here since this branch is consuming
+				# material, not adding it -- the previous unconditional `+=`
+				# added a consumed batch's qty back into what's still
+				# considered available for this Work Order, overstating it.
 				for batch_no, qty in row.batch_nos.items():
-					item_data.batch_details[batch_no] += qty
+					item_data.batch_details[batch_no] -= abs(flt(qty))
 
 			if row.serial_no:
 				for serial_no in get_serial_nos(row.serial_no):
