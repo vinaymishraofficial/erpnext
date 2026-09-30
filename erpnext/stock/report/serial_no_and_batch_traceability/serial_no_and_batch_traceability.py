@@ -153,6 +153,7 @@ class ReportData:
 			.inner_join(sabb_entry)
 			.on(sabb.name == sabb_entry.parent)
 			.select(
+				sabb.item_code,
 				sabb_entry.qty,
 				sabb_entry.warehouse,
 				sabb_entry.posting_datetime,

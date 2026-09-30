@@ -1341,11 +1341,24 @@ class SerialandBatchBundle(Document):
 		incorrect_serial_nos = frappe.get_all(
 			"Serial No",
 			filters={"name": ("in", serial_nos), "item_code": ("!=", self.item_code)},
-			fields=["name"],
+			pluck="name",
 		)
 
+		if (
+			incorrect_serial_nos
+			and self.type_of_transaction == "Inward"
+			and self.voucher_type == "Stock Entry"
+		):
+			from erpnext.stock.doctype.part_to_part_transfer.part_to_part_transfer import (
+				get_serial_nos_moving_to_item,
+			)
+
+			# Serials being re-identified under a new item by a Part to Part Transfer
+			moving = get_serial_nos_moving_to_item(self.item_code, self.voucher_no, incorrect_serial_nos)
+			incorrect_serial_nos = [d for d in incorrect_serial_nos if d not in moving]
+
 		if incorrect_serial_nos:
-			incorrect_serial_nos = ", ".join([d.name for d in incorrect_serial_nos])
+			incorrect_serial_nos = ", ".join(incorrect_serial_nos)
 			self.throw_error_message(
 				f"Serial Nos {bold(incorrect_serial_nos)} does not belong to Item {bold(self.item_code)}"
 			)
