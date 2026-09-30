@@ -5,34 +5,17 @@
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
-  "item_code",
-  "item_name",
-  "column_break_item",
   "serial_no",
   "batch_no",
-  "qty"
+  "column_break_item",
+  "item_code",
+  "item_name",
+  "qty",
+  "description"
  ],
  "fields": [
   {
-   "fieldname": "item_code",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Item Code",
-   "options": "Item",
-   "reqd": 1
-  },
-  {
-   "fetch_from": "item_code.item_name",
-   "fieldname": "item_name",
-   "fieldtype": "Data",
-   "label": "Item Name",
-   "read_only": 1
-  },
-  {
-   "fieldname": "column_break_item",
-   "fieldtype": "Column Break"
-  },
-  {
+   "description": "Pick the physical unit first - Item Code below fills in automatically",
    "fieldname": "serial_no",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -40,6 +23,7 @@
    "options": "Serial No"
   },
   {
+   "description": "For batch-tracked components instead of a Serial No",
    "fieldname": "batch_no",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -47,11 +31,39 @@
    "options": "Batch"
   },
   {
+   "fieldname": "column_break_item",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Filled in automatically from the Serial No / Batch No picked",
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Item Code",
+   "options": "Item",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fetch_from": "item_code.item_name",
+   "fieldname": "item_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Item Name",
+   "read_only": 1
+  },
+  {
    "fieldname": "qty",
    "fieldtype": "Float",
    "in_list_view": 1,
    "label": "Qty",
    "reqd": 1
+  },
+  {
+   "description": "Why this component is being removed/added, e.g. \"Faulty - calibration failure\" or \"Replacement, new spare\"",
+   "fieldname": "description",
+   "fieldtype": "Data",
+   "label": "Component Remarks"
   }
  ],
  "istable": 1,

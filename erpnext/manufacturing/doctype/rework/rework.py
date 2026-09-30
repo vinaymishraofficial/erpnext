@@ -31,7 +31,7 @@ Two paths, selected by `rework_house`:
 import frappe
 from frappe import _, bold
 from frappe.model.document import Document
-from frappe.utils import flt, nowdate, nowtime
+from frappe.utils import flt, get_link_to_form, nowdate, nowtime
 from pypika import Order
 
 from erpnext.stock.doctype.batch.batch import get_batch_qty
@@ -240,6 +240,7 @@ class Rework(Document):
 						row.idx, bold(row.serial_no), bold(self.issue_warehouse)
 					)
 				)
+			self.validate_serial_not_reserved(row)
 		elif row.batch_no:
 			available_qty = flt(get_batch_qty(batch_no=row.batch_no, warehouse=self.issue_warehouse))
 			if row.qty > available_qty:
@@ -250,6 +251,31 @@ class Rework(Document):
 				)
 		else:
 			frappe.throw(_("Row #{0}: Set a Serial No or Batch No").format(row.idx))
+
+	def validate_serial_not_reserved(self, row):
+		"""A serial can be Active/in-stock in Issue Warehouse and still be off-limits - reserved
+		for a Work Order via a Stock Reservation Entry. Checked explicitly here so this surfaces
+		as a clear validation error on this row, rather than as a confusing failure deep inside
+		the Repack Stock Entry's own submit.
+		"""
+		from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+			get_serial_no_reservation,
+		)
+
+		reservation = get_serial_no_reservation(row.item_code, row.serial_no, self.issue_warehouse)
+		if reservation:
+			frappe.throw(
+				_(
+					"Row #{0}: Serial No {1} is reserved for {2} {3} via {4}. Use an unreserved "
+					"serial number or cancel the reservation."
+				).format(
+					row.idx,
+					bold(row.serial_no),
+					reservation.voucher_type,
+					bold(reservation.voucher_no),
+					get_link_to_form("Stock Reservation Entry", reservation.name),
+				)
+			)
 
 	def validate_bought_out(self):
 		if not self.supplier:

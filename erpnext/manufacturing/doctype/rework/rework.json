@@ -15,20 +15,25 @@
   "fg_serial_no",
   "fg_item_code",
   "warehouse",
+  "section_break_composition",
+  "current_composition_html",
   "section_break_dates",
   "posting_date",
   "posting_time",
   "set_posting_time",
   "column_break_dates",
+  "section_break_reference",
   "quality_notification",
   "reason",
-  "section_break_inhouse",
+  "section_break_remove",
   "components_removed",
   "return_warehouse",
+  "section_break_add",
   "components_added",
   "issue_warehouse",
-  "column_break_inhouse",
+  "section_break_costing",
   "work_order",
+  "column_break_costing",
   "operation",
   "job_card",
   "section_break_boughtout",
@@ -101,12 +106,25 @@
    "fetch_from": "fg_serial_no.warehouse",
    "fieldname": "warehouse",
    "fieldtype": "Data",
-   "label": "Warehouse",
+   "label": "FG Warehouse",
    "read_only": 1
   },
   {
+   "depends_on": "eval:doc.fg_serial_no",
+   "fieldname": "section_break_composition",
+   "fieldtype": "Section Break",
+   "label": "Current Composition"
+  },
+  {
+   "description": "What this FG serial is currently built from, and its rework history - refreshes automatically when FG Serial No changes. Does not preview this draft's own unsaved Remove/Add rows below - only what has actually been submitted.",
+   "fieldname": "current_composition_html",
+   "fieldtype": "HTML",
+   "label": "Currently Installed"
+  },
+  {
    "fieldname": "section_break_dates",
-   "fieldtype": "Section Break"
+   "fieldtype": "Section Break",
+   "label": "Posting"
   },
   {
    "default": "Today",
@@ -140,10 +158,16 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Reference to the Quality Notification / Non-Conformance that triggered this Rework, if any",
+   "fieldname": "section_break_reference",
+   "fieldtype": "Section Break",
+   "label": "Reason & Reference"
+  },
+  {
+   "description": "The Non Conformance that triggered this Rework, if any",
    "fieldname": "quality_notification",
-   "fieldtype": "Data",
-   "label": "Quality Notification Reference"
+   "fieldtype": "Link",
+   "label": "Quality Notification",
+   "options": "Non Conformance"
   },
   {
    "fieldname": "reason",
@@ -151,11 +175,9 @@
    "label": "Reason"
   },
   {
-   "collapsible": 1,
-   "depends_on": "eval:doc.rework_house==\"In-House\"",
-   "fieldname": "section_break_inhouse",
+   "fieldname": "section_break_remove",
    "fieldtype": "Section Break",
-   "label": "In-House: Component Swap"
+   "label": "Remove (currently in the FG, coming out)"
   },
   {
    "allow_on_submit": 1,
@@ -166,11 +188,17 @@
    "options": "Rework Component"
   },
   {
-   "description": "Where removed/faulty components are returned to",
+   "depends_on": "eval:doc.rework_house==\"In-House\"",
+   "description": "Where removed/faulty components are returned to (In-House only - not used for Bought Out)",
    "fieldname": "return_warehouse",
    "fieldtype": "Link",
    "label": "Return Warehouse",
    "options": "Warehouse"
+  },
+  {
+   "fieldname": "section_break_add",
+   "fieldtype": "Section Break",
+   "label": "Add (going into the FG)"
   },
   {
    "allow_on_submit": 1,
@@ -181,15 +209,18 @@
    "options": "Rework Component"
   },
   {
-   "description": "Where replacement components are issued from",
+   "depends_on": "eval:doc.rework_house==\"In-House\"",
+   "description": "Where replacement components are issued from (In-House only - not used for Bought Out)",
    "fieldname": "issue_warehouse",
    "fieldtype": "Link",
    "label": "Issue Warehouse",
    "options": "Warehouse"
   },
   {
-   "fieldname": "column_break_inhouse",
-   "fieldtype": "Column Break"
+   "collapsible": 1,
+   "fieldname": "section_break_costing",
+   "fieldtype": "Section Break",
+   "label": "Labor & Costing (Optional)"
   },
   {
    "description": "Optional - the FG's original Work Order. Set this and Operation to track technician time via a Corrective Job Card.",
@@ -197,6 +228,10 @@
    "fieldtype": "Link",
    "label": "Work Order",
    "options": "Work Order"
+  },
+  {
+   "fieldname": "column_break_costing",
+   "fieldtype": "Column Break"
   },
   {
    "fieldname": "operation",
@@ -237,18 +272,22 @@
    "fieldtype": "Column Break"
   },
   {
+   "description": "Set automatically from the Sent Stock Entry on submit",
    "fieldname": "sent_date",
    "fieldtype": "Date",
-   "label": "Sent Date"
+   "label": "Sent Date",
+   "read_only": 1
   },
   {
    "allow_on_submit": 1,
+   "description": "Set automatically by \"Mark as Received\" - use that action, not this field, to record receipt",
    "fieldname": "received_date",
    "fieldtype": "Date",
-   "label": "Received Date"
+   "label": "Received Date",
+   "read_only": 1
   },
   {
-   "description": "Optional - for capturing the vendor's rework/repair service charge",
+   "description": "Optional - for capturing the vendor's rework/repair service charge. Must be a Purchase Order for the same Supplier.",
    "fieldname": "purchase_order",
    "fieldtype": "Link",
    "label": "Purchase Order",
