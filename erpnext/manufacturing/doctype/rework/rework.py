@@ -32,6 +32,7 @@ import frappe
 from frappe import _, bold
 from frappe.model.document import Document
 from frappe.utils import flt, nowdate, nowtime
+from pypika import Order
 
 from erpnext.stock.doctype.batch.batch import get_batch_qty
 
@@ -80,6 +81,28 @@ class Rework(Document):
 				)
 			)
 
+		if self.rework_house == "Bought Out" and serial.warehouse:
+			# The FG's own current warehouse feeds send_to_supplier()'s Stock Entry as
+			# s_warehouse - catch a cross-company mismatch here, at validate(), the same way
+			# validate_bought_out() already catches one on supplier_warehouse, instead of
+			# letting it surface later as a confusing Stock Entry-level error at submit().
+			warehouse_company = frappe.db.get_value("Warehouse", serial.warehouse, "company")
+			if warehouse_company != self.company:
+				frappe.throw(
+					_("FG Serial No {0}'s Warehouse {1} does not belong to Company {2}").format(
+						bold(self.fg_serial_no), bold(serial.warehouse), bold(self.company)
+					)
+				)
+
+	def validate_warehouse_company(self, warehouse, label):
+		if not warehouse:
+			return
+		company = frappe.db.get_value("Warehouse", warehouse, "company")
+		if company != self.company:
+			frappe.throw(
+				_("{0} {1} does not belong to Company {2}").format(label, bold(warehouse), bold(self.company))
+			)
+
 	def validate_inhouse(self):
 		if not self.components_removed and not self.components_added:
 			frappe.throw(_("Add at least one component to remove or add"))
@@ -89,6 +112,9 @@ class Rework(Document):
 
 		if self.components_added and not self.issue_warehouse:
 			frappe.throw(_("Set Issue Warehouse to record added components"))
+
+		self.validate_warehouse_company(self.return_warehouse, _("Return Warehouse"))
+		self.validate_warehouse_company(self.issue_warehouse, _("Issue Warehouse"))
 
 		for row in self.components_removed:
 			self.validate_removed_component(row)
@@ -104,20 +130,31 @@ class Rework(Document):
 			frappe.throw(_("Row #{0}: Qty must be greater than 0").format(row.idx))
 
 		if row.serial_no:
-			serial = frappe.db.get_value("Serial No", row.serial_no, ["item_code", "status"], as_dict=True)
+			serial = frappe.db.get_value("Serial No", row.serial_no, "item_code")
 			if not serial:
 				frappe.throw(_("Row #{0}: Serial No {1} does not exist").format(row.idx, bold(row.serial_no)))
-			if serial.item_code != row.item_code:
+			if serial != row.item_code:
 				frappe.throw(
 					_("Row #{0}: Serial No {1} belongs to Item {2}, not {3}").format(
-						row.idx, bold(row.serial_no), bold(serial.item_code), bold(row.item_code)
+						row.idx, bold(row.serial_no), bold(serial), bold(row.item_code)
 					)
 				)
-			if serial.status == "Active":
+			if not self.serial_was_last_consumed(row.serial_no):
+				# Deliberately checked against the serial's own ledger (its most recent
+				# non-cancelled movement), not the cached Serial No.status: status is updated
+				# per-event and gets reset to "Inactive" by core itself whenever a LATER
+				# "Consumed"-purpose movement is cancelled - which includes cancelling a Rework
+				# that had briefly returned this exact serial before being reverted. Using the
+				# ledger directly means a serial genuinely still sitting inside an FG (per its
+				# last standing movement) is recognised as such even across an unrelated
+				# cancel/amend cycle, while a serial with no such movement at all - e.g. one
+				# whose only history is a cancelled Material Receipt or Disassemble - is still
+				# correctly rejected as implausible.
 				frappe.throw(
 					_(
-						"Row #{0}: Serial No {1} is Active/free stock - it can't be removed from an FG "
-						"it isn't currently inside"
+						"Row #{0}: Serial No {1}'s last stock movement was not a consumption into "
+						"something (Manufacture/Repack/Material Issue) - it can't be removed from "
+						"an FG it isn't currently inside"
 					).format(row.idx, bold(row.serial_no))
 				)
 		elif row.batch_no:
@@ -128,8 +165,58 @@ class Rework(Document):
 						row.idx, bold(row.batch_no), bold(batch_item), bold(row.item_code)
 					)
 				)
+			self.validate_removed_batch_plausibility(row)
 		else:
 			frappe.throw(_("Row #{0}: Set a Serial No or Batch No").format(row.idx))
+
+	def serial_was_last_consumed(self, serial_no):
+		"""Whether this serial's most recent non-cancelled stock movement was a genuine outward
+		consumption (Manufacture/Repack/Material Issue/Material Consumption for Manufacture) -
+		i.e. it plausibly went INTO something and, as far as the ledger shows, is still there.
+		"""
+		from erpnext.stock.serial_batch_bundle import CONSUMED_SERIAL_NO_STOCK_ENTRY_PURPOSES
+
+		bundle = frappe.qb.DocType("Serial and Batch Bundle")
+		entry = frappe.qb.DocType("Serial and Batch Entry")
+		last_movement = (
+			frappe.qb.from_(entry)
+			.join(bundle)
+			.on(bundle.name == entry.parent)
+			.select(bundle.voucher_type, bundle.voucher_no, bundle.type_of_transaction)
+			.where((entry.serial_no == serial_no) & (bundle.docstatus == 1) & (bundle.is_cancelled == 0))
+			.orderby(bundle.posting_datetime, order=Order.desc)
+			.limit(1)
+			.run(as_dict=True)
+		)
+		if not last_movement:
+			return False
+
+		last_movement = last_movement[0]
+		if last_movement.type_of_transaction != "Outward" or last_movement.voucher_type != "Stock Entry":
+			return False
+
+		purpose = frappe.db.get_value("Stock Entry", last_movement.voucher_no, "purpose")
+		return purpose in CONSUMED_SERIAL_NO_STOCK_ENTRY_PURPOSES
+
+	def validate_removed_batch_plausibility(self, row):
+		# Batches have no per-unit status the way serials do, so there's no equivalent of the
+		# "must be Consumed" check above. The best available proxy is bounding the removal by
+		# what get_fg_current_composition() can already account for this batch (the reliable
+		# original baseline, plus anything a prior submitted Rework added) - anything beyond
+		# that is not plausibly inside this FG at all, let alone in this quantity.
+		composition = get_fg_current_composition(self.fg_serial_no)
+		current_qty = 0
+		for component in composition["current_components"]:
+			if component["item_code"] == row.item_code and component["batch_no"] == row.batch_no:
+				current_qty = flt(component["qty"])
+				break
+		if flt(row.qty) > current_qty:
+			frappe.throw(
+				_(
+					"Row #{0}: only {1} of Batch No {2} is currently recorded as part of FG Serial "
+					"{3} - can't remove {4}"
+				).format(row.idx, current_qty, bold(row.batch_no), bold(self.fg_serial_no), row.qty)
+			)
 
 	def validate_added_component(self, row):
 		if not row.qty or row.qty <= 0:
@@ -171,13 +258,7 @@ class Rework(Document):
 		if not self.supplier_warehouse:
 			frappe.throw(_("Set Supplier Warehouse for a Bought Out rework"))
 
-		company = frappe.db.get_value("Warehouse", self.supplier_warehouse, "company")
-		if company != self.company:
-			frappe.throw(
-				_("Supplier Warehouse {0} does not belong to Company {1}").format(
-					bold(self.supplier_warehouse), bold(self.company)
-				)
-			)
+		self.validate_warehouse_company(self.supplier_warehouse, _("Supplier Warehouse"))
 
 	def on_submit(self):
 		try:
@@ -188,9 +269,23 @@ class Rework(Document):
 		except Exception:
 			# Frappe already wrote docstatus=1 before calling on_submit - a failure here must
 			# not leave this looking submitted with nothing actually done (same fail-safe
-			# pattern as Part to Part Transfer's on_submit).
+			# pattern as Part to Part Transfer's on_submit). submit_inhouse() runs multiple
+			# steps (component Stock Entry, then an optional corrective Job Card) - an earlier
+			# step can have already succeeded and moved real stock before a later one fails, so
+			# undo that too, rather than leaving stock actually moved while this document
+			# reverts to looking like a plain, never-submitted Draft.
+			self.cleanup_after_failed_submit()
 			self.db_set("docstatus", 0, update_modified=False)
 			raise
+
+	def cleanup_after_failed_submit(self):
+		self.reload()
+		for fieldname in ("stock_entry", "sent_stock_entry"):
+			voucher = self.get(fieldname)
+			if not voucher:
+				continue
+			self.cleanup_failed_stock_entry(frappe.get_doc("Stock Entry", voucher))
+			self.db_set(fieldname, None, update_modified=False)
 
 	def submit_inhouse(self):
 		if self.components_removed or self.components_added:
@@ -199,11 +294,24 @@ class Rework(Document):
 			self.make_corrective_job_card()
 
 	def make_component_stock_entry(self):
+		# Core's own Stock Entry validation (validate_finished_goods) requires at least one row
+		# with only a target warehouse in any "Repack" entry - satisfied automatically when both
+		# removed and added rows are present (a removed row is target-only), but never
+		# satisfiable for an added-only entry, since every one of its rows is source-only. Using
+		# the matching single-direction purpose for a one-sided Rework (remove-only or add-only)
+		# avoids that check entirely, the same way a plain Material Receipt/Issue would.
+		if self.components_removed and self.components_added:
+			entry_type = "Repack"
+		elif self.components_removed:
+			entry_type = "Material Receipt"
+		else:
+			entry_type = "Material Issue"
+
 		stock_entry = frappe.new_doc("Stock Entry")
 		stock_entry.update(
 			{
-				"stock_entry_type": "Repack",
-				"purpose": "Repack",
+				"stock_entry_type": entry_type,
+				"purpose": entry_type,
 				"company": self.company,
 				"set_posting_time": 1,
 				"posting_date": self.posting_date,
@@ -274,8 +382,25 @@ class Rework(Document):
 
 		job_card = make_corrective(original_job_card, operation=self.operation, for_operation=self.operation)
 		job_card.flags.ignore_permissions = True
-		job_card.insert()
+		try:
+			job_card.insert()
+		except Exception:
+			# Document.insert() runs the DB insert before its own on_update() validation (e.g.
+			# validate_job_card_qty()) can throw, so a failure here can still leave a row
+			# behind. Clean it up rather than orphaning a Draft Job Card that would otherwise
+			# permanently occupy Work Order/Operation capacity for nothing.
+			self.cleanup_failed_job_card(job_card)
+			raise
 		self.db_set("job_card", job_card.name)
+
+	def cleanup_failed_job_card(self, job_card):
+		try:
+			if job_card.name and frappe.db.exists("Job Card", job_card.name):
+				frappe.delete_doc(
+					"Job Card", job_card.name, ignore_permissions=True, force=True, ignore_missing=True
+				)
+		except Exception:
+			frappe.log_error(title="Rework: could not clean up a Job Card left behind by a failed insert")
 
 	def send_to_supplier(self):
 		stock_entry = frappe.new_doc("Stock Entry")
@@ -362,7 +487,15 @@ class Rework(Document):
 		)
 		stock_entry.flags.ignore_permissions = True
 		stock_entry.insert()
-		stock_entry.submit()
+		try:
+			stock_entry.submit()
+		except Exception:
+			# Same defense-in-depth as make_component_stock_entry()/send_to_supplier(): don't
+			# rely solely on the surrounding request/transaction boundary to roll this back,
+			# since mark_received() can also be called from a background job or bulk script
+			# where an intervening commit may already have made the Stock Entry durable.
+			self.cleanup_failed_stock_entry(stock_entry)
+			raise
 
 		self.db_set("received_stock_entry", stock_entry.name, update_modified=False)
 		self.db_set("received_date", received_date or stock_entry.posting_date, update_modified=False)
@@ -385,17 +518,42 @@ class Rework(Document):
 				doc = frappe.get_doc("Stock Entry", voucher)
 				if doc.docstatus == 1:
 					doc.cancel()
-
-			if self.job_card:
-				job_card = frappe.get_doc("Job Card", self.job_card)
-				if job_card.docstatus == 1:
-					job_card.cancel()
 		except Exception:
 			# Frappe already wrote docstatus=2 before calling on_cancel - if a later
 			# transaction blocks reversing one of the linked Stock Entries partway through,
 			# nothing was actually reverted, so this must not be left looking cancelled either.
 			self.db_set("docstatus", 1, update_modified=False)
 			raise
+
+		self.cleanup_corrective_job_card_on_cancel()
+
+	def cleanup_corrective_job_card_on_cancel(self):
+		if not self.job_card:
+			return
+		try:
+			job_card = frappe.get_doc("Job Card", self.job_card)
+			if job_card.docstatus == 1:
+				job_card.cancel()
+			elif job_card.docstatus == 0:
+				# make_corrective_job_card() only ever inserts, never submits, the corrective
+				# Job Card - Draft is its normal post-submit state, not an edge case. Left
+				# alone, it would never be cancelled or deleted, and core's own Job Card
+				# qty-cap check (validate_job_card_qty) counts any non-cancelled Job Card -
+				# Draft included - against the Work Order operation's capacity, permanently
+				# blocking any later corrective Job Card for the same Work Order + Operation
+				# (including on amend-and-resubmit). Frappe's own delete_doc() refuses to
+				# delete a document that's still referenced by any Link field, and this
+				# Rework's own job_card field is exactly that reference - even though this
+				# Rework itself is already docstatus=2 by now, so clear it first.
+				self.db_set("job_card", None, update_modified=False)
+				job_card.delete(ignore_permissions=True)
+		except Exception:
+			# Every linked Stock Entry above has already been irreversibly cancelled by this
+			# point, so reverting this Rework's own docstatus back to "submitted" here (the
+			# same fail-safe on_submit uses) would misrepresent what actually happened - log
+			# and let the cancellation stand; the corrective Job Card can be cleaned up
+			# separately rather than blocking or rolling back a real, completed cancel.
+			frappe.log_error(title="Rework: could not clean up a corrective Job Card on cancel")
 
 
 @frappe.whitelist()
