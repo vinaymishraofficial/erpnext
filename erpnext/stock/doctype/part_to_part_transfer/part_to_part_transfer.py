@@ -21,7 +21,7 @@ flip to make or undo on submit/cancel.
 import frappe
 from frappe import _, bold
 from frappe.model.document import Document
-from frappe.utils import flt, nowdate, nowtime
+from frappe.utils import flt, get_link_to_form, nowdate, nowtime
 
 from erpnext.stock.doctype.batch.batch import get_batch_qty
 
@@ -195,6 +195,34 @@ class ParttoPartTransfer(Document):
 			frappe.throw(
 				_("Row #{0}: Serial No {1} is not available in Warehouse {2}").format(
 					row.idx, bold(row.serial_no), bold(self.warehouse)
+				)
+			)
+
+		self.validate_serial_not_reserved(row)
+
+	def validate_serial_not_reserved(self, row):
+		"""A serial can be Active/in-stock and still be off-limits - reserved for a Work Order
+		via a Stock Reservation Entry. Checked explicitly so this surfaces as a clear validation
+		error on this row, rather than as a confusing failure deep inside the Repack Stock
+		Entry's own submit (or worse, a converted item silently pulled out from under a Work
+		Order that still thinks it has this exact serial reserved).
+		"""
+		from erpnext.stock.doctype.serial_and_batch_bundle.serial_and_batch_bundle import (
+			get_serial_no_reservation,
+		)
+
+		reservation = get_serial_no_reservation(self.source_item, row.serial_no, self.warehouse)
+		if reservation:
+			frappe.throw(
+				_(
+					"Row #{0}: Serial No {1} is reserved for {2} {3} via {4}. Use an unreserved "
+					"serial number or cancel the reservation."
+				).format(
+					row.idx,
+					bold(row.serial_no),
+					reservation.voucher_type,
+					bold(reservation.voucher_no),
+					get_link_to_form("Stock Reservation Entry", reservation.name),
 				)
 			)
 
