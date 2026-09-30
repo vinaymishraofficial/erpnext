@@ -11,6 +11,7 @@
   "naming_series",
   "company",
   "warehouse",
+  "target_warehouse",
   "column_break_dates",
   "posting_date",
   "posting_time",
@@ -18,11 +19,13 @@
   "section_break_items",
   "source_item",
   "source_item_name",
+  "source_item_has_batch_no",
   "column_break_items",
   "target_item",
   "target_item_name",
   "section_break_serials",
   "serial_nos",
+  "batches",
   "qty",
   "section_break_other",
   "reason",
@@ -52,6 +55,7 @@
    "reqd": 1
   },
   {
+   "description": "Warehouse the serial numbers / batch currently sit in",
    "fieldname": "warehouse",
    "fieldtype": "Link",
    "in_list_view": 1,
@@ -59,6 +63,13 @@
    "label": "Warehouse",
    "options": "Warehouse",
    "reqd": 1
+  },
+  {
+   "description": "Leave blank to receive the Target Item in the same Warehouse",
+   "fieldname": "target_warehouse",
+   "fieldtype": "Link",
+   "label": "Target Warehouse",
+   "options": "Warehouse"
   },
   {
    "fieldname": "column_break_dates",
@@ -114,6 +125,14 @@
    "read_only": 1
   },
   {
+   "fetch_from": "source_item.has_batch_no",
+   "fieldname": "source_item_has_batch_no",
+   "fieldtype": "Check",
+   "hidden": 1,
+   "label": "Source Item Has Batch No",
+   "read_only": 1
+  },
+  {
    "fieldname": "column_break_items",
    "fieldtype": "Column Break"
   },
@@ -140,11 +159,20 @@
    "label": "Serial Nos"
   },
   {
+   "depends_on": "eval:!doc.source_item_has_batch_no",
    "fieldname": "serial_nos",
    "fieldtype": "Table",
    "label": "Serial Nos",
-   "options": "Part to Part Transfer Serial",
-   "reqd": 1
+   "mandatory_depends_on": "eval:!doc.source_item_has_batch_no",
+   "options": "Part to Part Transfer Serial"
+  },
+  {
+   "depends_on": "eval:doc.source_item_has_batch_no",
+   "fieldname": "batches",
+   "fieldtype": "Table",
+   "label": "Batches",
+   "mandatory_depends_on": "eval:doc.source_item_has_batch_no",
+   "options": "Part to Part Transfer Batch"
   },
   {
    "fieldname": "qty",

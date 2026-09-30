@@ -1,17 +1,29 @@
 # Copyright (c) 2026, Frappe Technologies Pvt. Ltd. and contributors
 # For license information, please see license.txt
 
-"""Move serial numbers from one item code to another while keeping the serial numbers.
+"""Move serial numbers, or a batch's quantity, from one item code to another.
 
 Works like SAP's material-to-material transfer posting (movement type 309): a Repack
-Stock Entry takes the serials out under the source item and brings the same serials
-back in under the target item, carrying their value across.
+Stock Entry takes the source item out and brings the target item back in, carrying
+value across. For serials, the exact same serial numbers come back in under the
+target item (set_item_on_serial_nos()) - a serial is one physical unit, so "the same
+serial" and "the same unit" are the same thing. A Batch has no such 1:1 identity - its
+quantity is shared and partial, so repointing an existing Batch's item the way we
+repoint a Serial No's item_code would silently misattribute that batch's other
+quantity and other warehouses/transactions. Batches are instead moved the same way any
+ordinary Repack already handles them: the old batch goes out under the source item as
+normal, and a brand-new Batch is minted under the target item for just the converted
+quantity - which is why the target item must have "Automatically Create New Batch"
+enabled (validated below), and why, unlike the serial path, there is no item-identity
+flip to make or undo on submit/cancel.
 """
 
 import frappe
 from frappe import _, bold
 from frappe.model.document import Document
-from frappe.utils import nowdate, nowtime
+from frappe.utils import flt, nowdate, nowtime
+
+from erpnext.stock.doctype.batch.batch import get_batch_qty
 
 
 class ParttoPartTransfer(Document):
@@ -32,13 +44,24 @@ class ParttoPartTransfer(Document):
 		self.set_posting_datetime()
 		self.validate_items()
 		self.validate_warehouse()
-		self.validate_serial_nos()
-		self.qty = len(self.serial_nos)
+		if self.is_batch_transfer():
+			self.validate_batches()
+			self.qty = flt(sum(row.qty for row in self.batches))
+		else:
+			self.validate_serial_nos()
+			self.qty = len(self.serial_nos)
+
+	def is_batch_transfer(self):
+		return bool(frappe.get_cached_value("Item", self.source_item, "has_batch_no"))
+
+	def get_target_warehouse(self):
+		return self.target_warehouse or self.warehouse
 
 	def on_submit(self):
 		try:
 			self.make_stock_entry()
-			set_item_on_serial_nos(self.get_serial_nos(), self.target_item)
+			if not self.is_batch_transfer():
+				set_item_on_serial_nos(self.get_serial_nos(), self.target_item)
 		except Exception:
 			# Nothing in on_submit persisted a usable Stock Entry (or it did and the
 			# serial flip after it failed); either way the parent must not be left
@@ -49,22 +72,28 @@ class ParttoPartTransfer(Document):
 			raise
 
 	def before_cancel(self):
-		self.validate_serial_nos_not_moved()
+		if not self.is_batch_transfer():
+			self.validate_serial_nos_not_moved()
 
 	def on_cancel(self):
 		try:
-			# Re-checked here (not just in before_cancel) because callers that
-			# cancel with flags.ignore_validate=True skip before_cancel entirely -
-			# on_cancel still runs, and it is the only remaining place that can
-			# stop a serial that has already moved on again from having its
-			# item_code silently reverted out from under that later transaction.
-			self.validate_serial_nos_not_moved()
+			if not self.is_batch_transfer():
+				# Re-checked here (not just in before_cancel) because callers that
+				# cancel with flags.ignore_validate=True skip before_cancel entirely -
+				# on_cancel still runs, and it is the only remaining place that can
+				# stop a serial that has already moved on again from having its
+				# item_code silently reverted out from under that later transaction.
+				# Batches have no equivalent identity flip to protect: the target
+				# item's batch is a brand-new document, so cancelling the Stock
+				# Entry alone fully reverses a batch transfer.
+				self.validate_serial_nos_not_moved()
 
 			stock_entry = frappe.get_doc("Stock Entry", self.stock_entry)
 			if stock_entry.docstatus == 1:
 				stock_entry.cancel()
 
-			set_item_on_serial_nos(self.get_serial_nos(), self.source_item)
+			if not self.is_batch_transfer():
+				set_item_on_serial_nos(self.get_serial_nos(), self.source_item)
 		except Exception:
 			# Frappe already wrote docstatus=2 to the DB before calling on_cancel.
 			# If the safety check (or the Stock Entry's own cancel) fails partway
@@ -89,14 +118,26 @@ class ParttoPartTransfer(Document):
 		source = get_item_details(self.source_item)
 		target = get_item_details(self.target_item)
 		for item in (source, target):
-			if item.disabled or not item.is_stock_item or not item.has_serial_no:
-				frappe.throw(
-					_("Item {0} must be an enabled stock item with Serial No").format(bold(item.name))
-				)
+			if item.disabled or not item.is_stock_item:
+				frappe.throw(_("Item {0} must be an enabled stock item").format(bold(item.name)))
+			if not item.has_serial_no and not item.has_batch_no:
+				frappe.throw(_("Item {0} must have Serial No or Batch No").format(bold(item.name)))
 
-			# Batch-wise serials would also need the batch moved; not supported yet.
-			if item.has_batch_no:
-				frappe.throw(_("Item {0} has Batch No, which is not supported").format(bold(item.name)))
+		if bool(source.has_serial_no) != bool(target.has_serial_no) or bool(source.has_batch_no) != bool(
+			target.has_batch_no
+		):
+			frappe.throw(
+				_("Source Item {0} and Target Item {1} must both use Serial No or both use Batch No").format(
+					bold(source.name), bold(target.name)
+				)
+			)
+
+		if source.has_batch_no and not target.create_new_batch:
+			frappe.throw(
+				_("Target Item {0} must have {1} enabled to receive a converted batch quantity").format(
+					bold(target.name), bold(_("Automatically Create New Batch"))
+				)
+			)
 
 		if source.stock_uom != target.stock_uom:
 			frappe.throw(
@@ -106,16 +147,21 @@ class ParttoPartTransfer(Document):
 			)
 
 	def validate_warehouse(self):
-		company, is_group = frappe.db.get_value("Warehouse", self.warehouse, ["company", "is_group"])
+		self.validate_one_warehouse(self.warehouse, "Warehouse")
+		if self.target_warehouse:
+			self.validate_one_warehouse(self.target_warehouse, "Target Warehouse")
+
+	def validate_one_warehouse(self, warehouse, label):
+		company, is_group = frappe.db.get_value("Warehouse", warehouse, ["company", "is_group"])
 		if company != self.company:
 			frappe.throw(
-				_("Warehouse {0} does not belong to Company {1}").format(
-					bold(self.warehouse), bold(self.company)
+				_("{0} {1} does not belong to Company {2}").format(
+					_(label), bold(warehouse), bold(self.company)
 				)
 			)
 
 		if is_group:
-			frappe.throw(_("Warehouse {0} is a group warehouse").format(bold(self.warehouse)))
+			frappe.throw(_("{0} {1} is a group warehouse").format(_(label), bold(warehouse)))
 
 	def validate_serial_nos(self):
 		serial_nos = self.get_serial_nos()
@@ -152,8 +198,47 @@ class ParttoPartTransfer(Document):
 				)
 			)
 
+	def validate_batches(self):
+		batch_nos = [row.batch_no for row in self.batches]
+		duplicates = {batch_no for batch_no in batch_nos if batch_nos.count(batch_no) > 1}
+		if duplicates:
+			frappe.throw(_("Batch No {0} is entered more than once").format(bold(", ".join(duplicates))))
+
+		details = {
+			row.name: row
+			for row in frappe.get_all(
+				"Batch", filters={"name": ("in", batch_nos)}, fields=["name", "item", "disabled"]
+			)
+		}
+		for row in self.batches:
+			self.validate_batch(row, details.get(row.batch_no))
+
+	def validate_batch(self, row, batch):
+		if not batch:
+			frappe.throw(_("Row #{0}: Batch No {1} does not exist").format(row.idx, bold(row.batch_no)))
+
+		if batch.item != self.source_item:
+			frappe.throw(
+				_("Row #{0}: Batch No {1} belongs to Item {2}, not {3}").format(
+					row.idx, bold(row.batch_no), bold(batch.item), bold(self.source_item)
+				)
+			)
+
+		if batch.disabled:
+			frappe.throw(_("Row #{0}: Batch No {1} is disabled").format(row.idx, bold(row.batch_no)))
+
+		if not row.qty or row.qty <= 0:
+			frappe.throw(_("Row #{0}: Qty must be greater than 0").format(row.idx))
+
+		available_qty = flt(get_batch_qty(batch_no=row.batch_no, warehouse=self.warehouse))
+		if row.qty > available_qty:
+			frappe.throw(
+				_("Row #{0}: Only {1} of Batch No {2} is available in Warehouse {3}").format(
+					row.idx, available_qty, bold(row.batch_no), bold(self.warehouse)
+				)
+			)
+
 	def make_stock_entry(self):
-		serial_nos = "\n".join(self.get_serial_nos())
 		stock_entry = frappe.new_doc("Stock Entry")
 		stock_entry.update(
 			{
@@ -166,15 +251,40 @@ class ParttoPartTransfer(Document):
 				"remarks": _("Part to Part Transfer {0}").format(self.name),
 			}
 		)
-		stock_entry.append(
-			"items", self.get_stock_entry_row(self.source_item, serial_nos, s_warehouse=self.warehouse)
-		)
-		stock_entry.append(
-			"items",
-			self.get_stock_entry_row(
-				self.target_item, serial_nos, t_warehouse=self.warehouse, is_finished_item=1
-			),
-		)
+		target_warehouse = self.get_target_warehouse()
+
+		if self.is_batch_transfer():
+			for row in self.batches:
+				stock_entry.append(
+					"items",
+					self.get_stock_entry_row(
+						self.source_item, row.qty, s_warehouse=self.warehouse, batch_no=row.batch_no
+					),
+				)
+			stock_entry.append(
+				"items",
+				self.get_stock_entry_row(
+					self.target_item, self.qty, t_warehouse=target_warehouse, is_finished_item=1
+				),
+			)
+		else:
+			serial_nos = "\n".join(self.get_serial_nos())
+			stock_entry.append(
+				"items",
+				self.get_stock_entry_row(
+					self.source_item, self.qty, s_warehouse=self.warehouse, serial_no=serial_nos
+				),
+			)
+			stock_entry.append(
+				"items",
+				self.get_stock_entry_row(
+					self.target_item,
+					self.qty,
+					t_warehouse=target_warehouse,
+					is_finished_item=1,
+					serial_no=serial_nos,
+				),
+			)
 
 		stock_entry.flags.ignore_permissions = True
 		stock_entry.insert()
@@ -207,16 +317,15 @@ class ParttoPartTransfer(Document):
 				"left behind by a failed submit"
 			)
 
-	def get_stock_entry_row(self, item_code, serial_nos, **kwargs):
+	def get_stock_entry_row(self, item_code, qty, **kwargs):
 		stock_uom = frappe.get_cached_value("Item", item_code, "stock_uom")
 		return {
 			"item_code": item_code,
-			"qty": self.qty,
+			"qty": qty,
 			"uom": stock_uom,
 			"stock_uom": stock_uom,
 			"conversion_factor": 1,
 			"use_serial_batch_fields": 1,
-			"serial_no": serial_nos,
 			**kwargs,
 		}
 
@@ -301,6 +410,14 @@ def get_item_details(item_code):
 	return frappe.get_cached_value(
 		"Item",
 		item_code,
-		["name", "disabled", "is_stock_item", "has_serial_no", "has_batch_no", "stock_uom"],
+		[
+			"name",
+			"disabled",
+			"is_stock_item",
+			"has_serial_no",
+			"has_batch_no",
+			"create_new_batch",
+			"stock_uom",
+		],
 		as_dict=True,
 	)
