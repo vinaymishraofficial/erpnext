@@ -1,0 +1,367 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "autoname": "naming_series:",
+ "creation": "2026-09-30 20:00:00.000000",
+ "default_view": "List",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "naming_series",
+  "rework_house",
+  "company",
+  "column_break_header",
+  "fg_serial_no",
+  "fg_item_code",
+  "warehouse",
+  "section_break_dates",
+  "posting_date",
+  "posting_time",
+  "set_posting_time",
+  "column_break_dates",
+  "quality_notification",
+  "reason",
+  "section_break_inhouse",
+  "components_removed",
+  "return_warehouse",
+  "components_added",
+  "issue_warehouse",
+  "column_break_inhouse",
+  "work_order",
+  "operation",
+  "job_card",
+  "section_break_boughtout",
+  "supplier",
+  "supplier_warehouse",
+  "column_break_boughtout",
+  "sent_date",
+  "received_date",
+  "purchase_order",
+  "section_break_other",
+  "stock_entry",
+  "sent_stock_entry",
+  "received_stock_entry",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "default": "MAT-RWK-.YYYY.-",
+   "fieldname": "naming_series",
+   "fieldtype": "Select",
+   "label": "Series",
+   "no_copy": 1,
+   "options": "MAT-RWK-.YYYY.-",
+   "print_hide": 1,
+   "reqd": 1,
+   "set_only_once": 1
+  },
+  {
+   "default": "In-House",
+   "fieldname": "rework_house",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Rework Location",
+   "options": "In-House\nBought Out",
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "remember_last_selected_value": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_header",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "The already-serialized Finished Good being reworked - its own serial number never changes",
+   "fieldname": "fg_serial_no",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "FG Serial No",
+   "options": "Serial No",
+   "reqd": 1
+  },
+  {
+   "fetch_from": "fg_serial_no.item_code",
+   "fieldname": "fg_item_code",
+   "fieldtype": "Data",
+   "label": "FG Item Code",
+   "read_only": 1
+  },
+  {
+   "description": "The FG's current warehouse - informational, never changes during a Rework",
+   "fetch_from": "fg_serial_no.warehouse",
+   "fieldname": "warehouse",
+   "fieldtype": "Data",
+   "label": "Warehouse",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_dates",
+   "fieldtype": "Section Break"
+  },
+  {
+   "default": "Today",
+   "fieldname": "posting_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Posting Date",
+   "no_copy": 1,
+   "read_only_depends_on": "eval:!doc.set_posting_time",
+   "reqd": 1
+  },
+  {
+   "default": "Now",
+   "fieldname": "posting_time",
+   "fieldtype": "Time",
+   "label": "Posting Time",
+   "no_copy": 1,
+   "read_only_depends_on": "eval:!doc.set_posting_time",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "depends_on": "eval:doc.docstatus==0",
+   "fieldname": "set_posting_time",
+   "fieldtype": "Check",
+   "label": "Edit Posting Date and Time",
+   "print_hide": 1
+  },
+  {
+   "fieldname": "column_break_dates",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Reference to the Quality Notification / Non-Conformance that triggered this Rework, if any",
+   "fieldname": "quality_notification",
+   "fieldtype": "Data",
+   "label": "Quality Notification Reference"
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason"
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "eval:doc.rework_house==\"In-House\"",
+   "fieldname": "section_break_inhouse",
+   "fieldtype": "Section Break",
+   "label": "In-House: Component Swap"
+  },
+  {
+   "allow_on_submit": 1,
+   "description": "For Bought Out: informational only, populated from what the vendor reports on return (a delivery challan or receiving Quality Inspection) - not independently verified against a stock movement, since work done at the vendor's own site is outside this system's visibility",
+   "fieldname": "components_removed",
+   "fieldtype": "Table",
+   "label": "Components Removed",
+   "options": "Rework Component"
+  },
+  {
+   "description": "Where removed/faulty components are returned to",
+   "fieldname": "return_warehouse",
+   "fieldtype": "Link",
+   "label": "Return Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "allow_on_submit": 1,
+   "description": "For Bought Out: informational only, same caveat as Components Removed",
+   "fieldname": "components_added",
+   "fieldtype": "Table",
+   "label": "Components Added",
+   "options": "Rework Component"
+  },
+  {
+   "description": "Where replacement components are issued from",
+   "fieldname": "issue_warehouse",
+   "fieldtype": "Link",
+   "label": "Issue Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "column_break_inhouse",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Optional - the FG's original Work Order. Set this and Operation to track technician time via a Corrective Job Card.",
+   "fieldname": "work_order",
+   "fieldtype": "Link",
+   "label": "Work Order",
+   "options": "Work Order"
+  },
+  {
+   "fieldname": "operation",
+   "fieldtype": "Link",
+   "label": "Operation",
+   "options": "Operation"
+  },
+  {
+   "fieldname": "job_card",
+   "fieldtype": "Link",
+   "label": "Corrective Job Card",
+   "no_copy": 1,
+   "options": "Job Card",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "depends_on": "eval:doc.rework_house==\"Bought Out\"",
+   "fieldname": "section_break_boughtout",
+   "fieldtype": "Section Break",
+   "label": "Bought Out: Vendor Round-Trip"
+  },
+  {
+   "fieldname": "supplier",
+   "fieldtype": "Link",
+   "label": "Supplier",
+   "options": "Supplier"
+  },
+  {
+   "description": "Warehouse representing the supplier's location - the FG's serial moves here while at the vendor",
+   "fieldname": "supplier_warehouse",
+   "fieldtype": "Link",
+   "label": "Supplier Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "fieldname": "column_break_boughtout",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sent_date",
+   "fieldtype": "Date",
+   "label": "Sent Date"
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "received_date",
+   "fieldtype": "Date",
+   "label": "Received Date"
+  },
+  {
+   "description": "Optional - for capturing the vendor's rework/repair service charge",
+   "fieldname": "purchase_order",
+   "fieldtype": "Link",
+   "label": "Purchase Order",
+   "options": "Purchase Order"
+  },
+  {
+   "fieldname": "section_break_other",
+   "fieldtype": "Section Break",
+   "label": "More Info"
+  },
+  {
+   "fieldname": "stock_entry",
+   "fieldtype": "Link",
+   "label": "Stock Entry",
+   "no_copy": 1,
+   "options": "Stock Entry",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "sent_stock_entry",
+   "fieldtype": "Link",
+   "label": "Sent Stock Entry",
+   "no_copy": 1,
+   "options": "Stock Entry",
+   "read_only": 1
+  },
+  {
+   "allow_on_submit": 1,
+   "fieldname": "received_stock_entry",
+   "fieldtype": "Link",
+   "label": "Received Stock Entry",
+   "no_copy": 1,
+   "options": "Stock Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "no_copy": 1,
+   "options": "Rework",
+   "print_hide": 1,
+   "read_only": 1,
+   "search_index": 1
+  }
+ ],
+ "is_submittable": 1,
+ "links": [],
+ "modified": "2026-09-30 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Manufacturing",
+ "name": "Rework",
+ "naming_rule": "By \"Naming Series\" field",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing Manager",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "amend": 1,
+   "cancel": 1,
+   "create": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Manufacturing User",
+   "share": 1,
+   "submit": 1,
+   "write": 1
+  },
+  {
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Stock User"
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "fg_serial_no",
+ "track_changes": 1
+}
