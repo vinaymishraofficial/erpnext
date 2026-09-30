@@ -15,6 +15,19 @@ from frappe.utils import nowdate, nowtime
 
 
 class ParttoPartTransfer(Document):
+	def insert(self, *args, **kwargs):
+		if self.amended_from:
+			# `stock_entry` is no_copy, but Frappe's amend flow copies no_copy
+			# fields too (unlike Duplicate), so the fresh draft would otherwise
+			# still point at the Stock Entry the cancelled original already
+			# cancelled - and Document.insert() rejects any link to a cancelled
+			# document before before_insert() ever runs, so this has to be
+			# cleared here rather than in a hook. on_submit() sets it again once
+			# this amendment is itself submitted.
+			self.stock_entry = None
+
+		return super().insert(*args, **kwargs)
+
 	def validate(self):
 		self.set_posting_datetime()
 		self.validate_items()
@@ -23,18 +36,43 @@ class ParttoPartTransfer(Document):
 		self.qty = len(self.serial_nos)
 
 	def on_submit(self):
-		self.make_stock_entry()
-		set_item_on_serial_nos(self.get_serial_nos(), self.target_item)
+		try:
+			self.make_stock_entry()
+			set_item_on_serial_nos(self.get_serial_nos(), self.target_item)
+		except Exception:
+			# Nothing in on_submit persisted a usable Stock Entry (or it did and the
+			# serial flip after it failed); either way the parent must not be left
+			# looking submitted with no Repack behind it. Frappe already wrote
+			# docstatus=1 to the DB before calling on_submit, so an exception here
+			# would otherwise leave a permanently stuck, uncancellable document.
+			self.db_set("docstatus", 0, update_modified=False)
+			raise
 
 	def before_cancel(self):
 		self.validate_serial_nos_not_moved()
 
 	def on_cancel(self):
-		stock_entry = frappe.get_doc("Stock Entry", self.stock_entry)
-		if stock_entry.docstatus == 1:
-			stock_entry.cancel()
+		try:
+			# Re-checked here (not just in before_cancel) because callers that
+			# cancel with flags.ignore_validate=True skip before_cancel entirely -
+			# on_cancel still runs, and it is the only remaining place that can
+			# stop a serial that has already moved on again from having its
+			# item_code silently reverted out from under that later transaction.
+			self.validate_serial_nos_not_moved()
 
-		set_item_on_serial_nos(self.get_serial_nos(), self.source_item)
+			stock_entry = frappe.get_doc("Stock Entry", self.stock_entry)
+			if stock_entry.docstatus == 1:
+				stock_entry.cancel()
+
+			set_item_on_serial_nos(self.get_serial_nos(), self.source_item)
+		except Exception:
+			# Frappe already wrote docstatus=2 to the DB before calling on_cancel.
+			# If the safety check (or the Stock Entry's own cancel) fails partway
+			# through, nothing was actually reverted - the linked Stock Entry is
+			# still submitted and the serial is still on the target item - so the
+			# parent must not be left looking cancelled either.
+			self.db_set("docstatus", 1, update_modified=False)
+			raise
 
 	def get_serial_nos(self):
 		return [row.serial_no for row in self.serial_nos]
@@ -140,8 +178,34 @@ class ParttoPartTransfer(Document):
 
 		stock_entry.flags.ignore_permissions = True
 		stock_entry.insert()
-		stock_entry.submit()
+		try:
+			stock_entry.submit()
+		except Exception:
+			# Don't leave an orphaned Repack behind if it fails to submit (e.g. a
+			# backdated posting datetime clashing with a later transaction). This
+			# must never itself raise: Frappe writes docstatus=1 to the DB before
+			# running on_submit, so a failed submit() can leave the Stock Entry
+			# looking "submitted" in the DB even though its in-memory object
+			# already reflects that - a plain delete() would then refuse ("Submitted
+			# Record cannot be deleted") and replace the real error with a
+			# confusing one of our own making.
+			self.cleanup_failed_stock_entry(stock_entry)
+			raise
 		self.db_set("stock_entry", stock_entry.name)
+
+	def cleanup_failed_stock_entry(self, stock_entry):
+		try:
+			stock_entry.reload()
+			if stock_entry.docstatus == 1:
+				stock_entry.flags.ignore_permissions = True
+				stock_entry.cancel()
+			if stock_entry.docstatus == 0:
+				stock_entry.delete(ignore_permissions=True)
+		except Exception:
+			frappe.log_error(
+				title="Part to Part Transfer: could not clean up a Repack Stock Entry "
+				"left behind by a failed submit"
+			)
 
 	def get_stock_entry_row(self, item_code, serial_nos, **kwargs):
 		stock_uom = frappe.get_cached_value("Item", item_code, "stock_uom")
