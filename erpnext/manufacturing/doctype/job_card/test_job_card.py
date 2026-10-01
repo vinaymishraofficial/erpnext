@@ -1136,6 +1136,50 @@ class TestJobCard(ERPNextTestSuite):
 		self.assertEqual(flt(job_card.total_completed_qty), 3)
 		self.assertEqual(flt(job_card.process_loss_qty), 0)
 
+	def test_completion_allows_zero_completed_qty(self):
+		work_order = make_wo_order_test_record(item="_Test FG Item 2", qty=5)
+
+		job_card = self.get_first_job_card(work_order.name)
+		job_card.append("time_logs", {"from_time": "2024-03-01 08:00:00"})
+		job_card.save()
+
+		job_card.complete_job_card(
+			qty=0,
+			for_quantity=5,
+			pending_qty=0,
+			process_loss_qty=5,
+			end_time="2024-03-01 09:00:00",
+		)
+
+		job_card.reload()
+		self.assertEqual(flt(job_card.total_completed_qty), 0)
+		self.assertEqual(flt(job_card.process_loss_qty), 5)
+
+		job_card.submit()
+		self.assertEqual(job_card.docstatus, 1)
+
+	def test_completion_overwrites_existing_completed_qty_with_zero(self):
+		work_order = make_wo_order_test_record(item="_Test FG Item 2", qty=5)
+
+		job_card = self.get_first_job_card(work_order.name)
+		job_card.append("time_logs", {"from_time": "2024-03-01 08:00:00", "completed_qty": 5})
+
+		job_card.complete_job_card(
+			qty=0,
+			for_quantity=5,
+			pending_qty=0,
+			process_loss_qty=5,
+			end_time="2024-03-01 09:00:00",
+		)
+
+		job_card.reload()
+		self.assertEqual(flt(job_card.total_completed_qty), 0)
+		self.assertEqual(flt(job_card.process_loss_qty), 5)
+		self.assertEqual(flt(job_card.time_logs[0].completed_qty), 0)
+
+		job_card.submit()
+		self.assertEqual(job_card.docstatus, 1)
+
 	def test_completion_qty_keeps_for_quantity_across_cycles(self):
 		work_order = make_wo_order_test_record(item="_Test FG Item 2", qty=5)
 
@@ -1550,6 +1594,99 @@ class TestJobCard(ERPNextTestSuite):
 			flt(frappe.db.get_value("Work Order Operation", work_order.operations[0].name, "completed_qty")),
 			8,
 		)
+
+	def test_semi_fg_secondary_items_across_split_job_cards(self):
+		from erpnext.manufacturing.doctype.operation.test_operation import make_operation
+		from erpnext.stock.doctype.item.test_item import make_item
+
+		warehouse = "Stores - _TC"
+		rm = make_item("Split JC Scrap RM", {"is_stock_item": 1, "valuation_rate": 100}).name
+		fg = make_item("Split JC Scrap FG", {"is_stock_item": 1}).name
+		scrap = make_item("Split JC Scrap", {"is_stock_item": 1, "valuation_rate": 5}).name
+
+		fg_bom = frappe.new_doc(
+			"BOM",
+			company="_Test Company",
+			item=fg,
+			quantity=1,
+			with_operations=1,
+			track_semi_finished_goods=1,
+		)
+		fg_bom.append("items", {"item_code": rm, "qty": 1, "operation_row_id": 1})
+		fg_bom.append("secondary_items", {"item_code": scrap, "qty": 1, "secondary_item_type": "Scrap"})
+
+		operation = {
+			"operation": "Split JC Scrap Op",
+			"workstation": "_Test Workstation A",
+			"finished_good": fg,
+			"finished_good_qty": 1,
+			"is_final_finished_good": 1,
+			"sequence_id": 1,
+			"time_in_mins": 60,
+			"source_warehouse": warehouse,
+			"fg_warehouse": warehouse,
+			"skip_material_transfer": 1,
+		}
+		make_workstation(operation)
+		make_operation(operation)
+		fg_bom.append("operations", operation)
+		fg_bom.insert()
+		fg_bom.submit()
+
+		work_order = make_wo_order_test_record(
+			item=fg,
+			qty=10,
+			source_warehouse=warehouse,
+			fg_warehouse=warehouse,
+			bom_no=fg_bom.name,
+			skip_transfer=1,
+			do_not_save=True,
+		)
+		work_order.operations[0].time_in_mins = 60
+		work_order.save()
+		work_order.submit()
+
+		make_stock_entry(item_code=rm, target=warehouse, qty=100, basic_rate=100)
+
+		job_card = frappe.get_doc(
+			"Job Card", frappe.db.get_value("Job Card", {"work_order": work_order.name}, "name")
+		)
+		job_card.for_quantity = 5
+		job_card.secondary_items[0].stock_qty = 5
+		job_card.append(
+			"time_logs",
+			{"from_time": "2024-02-01 08:00:00", "to_time": "2024-02-01 09:00:00", "completed_qty": 5},
+		)
+		job_card.save()
+		job_card.submit()
+		frappe.get_doc(job_card.make_stock_entry_for_semi_fg_item()).submit()
+
+		make_job_card(
+			work_order.name,
+			[
+				{
+					"name": work_order.operations[0].name,
+					"operation": "Split JC Scrap Op",
+					"qty": 5,
+					"pending_qty": 5,
+					"skip_material_transfer": 1,
+				}
+			],
+		)
+
+		job_card = frappe.get_doc(
+			"Job Card", frappe.db.get_value("Job Card", {"work_order": work_order.name, "docstatus": 0})
+		)
+		job_card.append(
+			"time_logs",
+			{"from_time": "2024-02-02 08:00:00", "to_time": "2024-02-02 09:00:00", "completed_qty": 5},
+		)
+		job_card.save()
+		job_card.submit()
+
+		stock_entry = frappe.get_doc(job_card.make_stock_entry_for_semi_fg_item())
+		scrap_qty = sum(row.qty for row in stock_entry.items if row.item_code == scrap)
+		self.assertEqual(scrap_qty, 5)
 
 	def test_semi_fg_process_loss_rolls_up_to_work_order(self):
 		from erpnext.manufacturing.doctype.operation.test_operation import make_operation
@@ -2975,6 +3112,12 @@ class TestJobCard(ERPNextTestSuite):
 		jc.validate_completion_qty_split(
 			frappe._dict(for_quantity=5, qty=3, pending_qty=2, process_loss_qty=0)
 		)
+		jc.validate_completion_qty_split(
+			frappe._dict(for_quantity=5, qty=0, pending_qty=0, process_loss_qty=5)
+		)
+		jc.validate_completion_qty_split(
+			frappe._dict(for_quantity=5, qty=0, pending_qty=5, process_loss_qty=0)
+		)
 
 		self.assertRaises(
 			frappe.ValidationError,
@@ -2987,6 +3130,31 @@ class TestJobCard(ERPNextTestSuite):
 			jc.validate_completion_qty_split,
 			frappe._dict(for_quantity=1, qty=0.3334, pending_qty=0.3334, process_loss_qty=0.3334),
 		)
+
+	def test_complete_job_card_qty_guards(self):
+		jc = frappe.new_doc("Job Card")
+		jc.for_quantity = 5
+		self.assertRaises(frappe.ValidationError, jc.validate_complete_job_card_qty, frappe._dict(qty=-1))
+
+	def test_set_process_loss(self):
+		nothing_done = frappe.new_doc("Job Card")
+		nothing_done.for_quantity = 10
+		nothing_done.total_completed_qty = 0
+		nothing_done.set_process_loss()
+		self.assertEqual(nothing_done.process_loss_qty, 0)
+
+		all_process_loss = frappe.new_doc("Job Card")
+		all_process_loss.for_quantity = 10
+		all_process_loss.process_loss_qty = 10
+		all_process_loss.set_process_loss()
+		self.assertEqual(all_process_loss.process_loss_qty, 10)
+
+	def test_zero_completed_qty_is_valid_for_semi_finished_goods(self):
+		jc = frappe.new_doc("Job Card")
+		jc.docstatus = 1
+		jc.track_semi_finished_goods = 1
+		jc.process_loss_qty = 5
+		jc.validate_semi_finished_goods()
 
 
 def create_bom_with_multiple_operations():

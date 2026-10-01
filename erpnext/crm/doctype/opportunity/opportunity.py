@@ -122,11 +122,12 @@ class Opportunity(TransactionBase, CRMNote):
 		if self.opportunity_from == "Lead":
 			frappe.get_doc("Lead", self.party_name).set_status(update=True)
 
-			link_open_tasks(self.opportunity_from, self.party_name, self)
-			link_open_events(self.opportunity_from, self.party_name, self)
+			ignore_permissions = self.flags.ignore_permissions
+			link_open_tasks(self.opportunity_from, self.party_name, self, ignore_permissions)
+			link_open_events(self.opportunity_from, self.party_name, self, ignore_permissions)
 			if frappe.db.get_single_value("CRM Settings", "carry_forward_communication_and_comments"):
-				copy_comments(self.opportunity_from, self.party_name, self)
-				link_communications(self.opportunity_from, self.party_name, self)
+				copy_comments(self.opportunity_from, self.party_name, self, ignore_permissions)
+				link_communications(self.opportunity_from, self.party_name, self, ignore_permissions)
 
 	def validate(self):
 		self.set_opportunity_type()
@@ -167,7 +168,7 @@ class Opportunity(TransactionBase, CRMNote):
 
 	def set_opportunity_type(self):
 		if self.is_new() and not self.opportunity_type:
-			self.opportunity_type = _("Sales")
+			self.opportunity_type = "Sales"
 
 	def set_exchange_rate(self):
 		company_currency = frappe.get_cached_value("Company", self.company, "default_currency")
@@ -555,8 +556,13 @@ def make_opportunity_from_communication(
 ):
 	from erpnext.crm.doctype.lead.lead import make_lead_from_communication
 
+	# Communication grants read to `All` only for the owner and carries a has_permission hook, so doc=
+	# is what decides access.
+	frappe.has_permission("Communication", doc=communication, throw=True)
+
 	doc = frappe.get_doc("Communication", communication)
 
+	# make_lead_from_communication() checks, but is skipped when the email already references a Lead.
 	lead = doc.reference_name if doc.reference_doctype == "Lead" else None
 	if not lead:
 		lead = make_lead_from_communication(communication, ignore_communication_links=True)

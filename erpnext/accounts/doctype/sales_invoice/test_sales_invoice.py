@@ -46,7 +46,7 @@ from erpnext.stock.doctype.stock_reconciliation.test_stock_reconciliation import
 	create_stock_reconciliation,
 )
 from erpnext.stock.get_item_details import get_item_tax_map
-from erpnext.stock.utils import get_incoming_rate, get_stock_balance
+from erpnext.stock.utils import _get_incoming_rate, get_stock_balance
 from erpnext.tests.utils import ERPNextTestSuite
 
 
@@ -3157,7 +3157,7 @@ class TestSalesInvoice(ERPNextTestSuite):
 
 		rate = 0.0
 		for d in si.get("items"):
-			rate = get_incoming_rate(
+			rate = _get_incoming_rate(
 				{
 					"item_code": d.item_code,
 					"warehouse": d.warehouse,
@@ -5295,6 +5295,34 @@ class TestSalesInvoice(ERPNextTestSuite):
 		self.assertEqual(target_doc.items[0].cost_center, None)
 
 		frappe.db.set_value("Company", "_Test Company 1", "cost_center", cost_center)
+
+	@ERPNextTestSuite.change_settings("Stock Settings", {"enable_stock_reservation": 1})
+	def test_update_stock_restricted_to_reserved_produced_serial_nos(self):
+		from erpnext.selling.doctype.sales_order.sales_order import (
+			make_sales_invoice as make_si_from_so,
+		)
+		from erpnext.stock.doctype.delivery_note.test_delivery_note import (
+			make_so_with_reserved_produced_serial_no,
+		)
+
+		so, reserved, unreserved = make_so_with_reserved_produced_serial_no()
+
+		def make_si(serial_no):
+			si = make_si_from_so(so.name)
+			si.update_stock = 1
+			si.items[0].warehouse = so.items[0].warehouse
+			si.items[0].use_serial_batch_fields = 1
+			si.items[0].serial_no = serial_no
+			return si.save()
+
+		frappe.db.savepoint("unreserved_serial_no")
+		si = make_si(unreserved[0])
+		self.assertRaises(frappe.ValidationError, si.submit)
+		frappe.db.rollback(save_point="unreserved_serial_no")
+
+		si = make_si(reserved[0])
+		si.submit()
+		self.assertEqual(get_serial_nos_from_bundle(si.items[0].serial_and_batch_bundle), reserved)
 
 
 def make_item_for_si(item_code, properties=None):

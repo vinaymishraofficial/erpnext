@@ -208,6 +208,11 @@ def remove_standard_fields(out: ItemDetails):
 	return out
 
 
+@frappe.request_cache
+def has_source_doc_permission(doctype: str, docname: str, user: str) -> bool:
+	return frappe.has_permission(doctype, doc=docname, user=user)
+
+
 def get_rate_locked_source_row(ctx: ItemDetailsCtx, doc) -> frappe._dict | None:
 	"""Return the persisted source-document row a mapped target row is locked to.
 
@@ -237,7 +242,7 @@ def get_rate_locked_source_row(ctx: ItemDetailsCtx, doc) -> frappe._dict | None:
 			source = frappe.db.get_value(
 				source_doctype, source_name, [*LOCKED_RATE_FIELDS, "parent", "parenttype"], as_dict=True
 			)
-			if source and frappe.has_permission(source.parenttype, doc=source.parent):
+			if source and has_source_doc_permission(source.parenttype, source.parent, frappe.session.user):
 				return source
 			return None
 	return None
@@ -274,7 +279,7 @@ def set_valuation_rate(out: ItemDetails | dict, ctx: ItemDetailsCtx):
 
 		for bundle_item in bundled_items.items:
 			valuation_rate += flt(
-				get_valuation_rate(bundle_item.item_code, ctx.company, out.get("warehouse")).get(
+				_get_valuation_rate(bundle_item.item_code, ctx.company, out.get("warehouse")).get(
 					"valuation_rate"
 				)
 				* bundle_item.qty
@@ -283,7 +288,7 @@ def set_valuation_rate(out: ItemDetails | dict, ctx: ItemDetailsCtx):
 		out.update({"valuation_rate": valuation_rate})
 
 	else:
-		out.update(get_valuation_rate(ctx.item_code, ctx.company, out.get("warehouse")))
+		out.update(_get_valuation_rate(ctx.item_code, ctx.company, out.get("warehouse")))
 
 
 def update_stock(ctx, out, doc=None):
@@ -1649,6 +1654,10 @@ def get_conversion_factor(item_code, uom):
 
 @frappe.whitelist()
 def get_projected_qty(item_code, warehouse):
+	# record-level read on the item, as get_item_details() in this file already does. Nothing in the
+	# tree calls this, so no caller's roles constrain the choice.
+	frappe.has_permission("Item", doc=item_code, throw=True)
+
 	return {
 		"projected_qty": frappe.db.get_value(
 			"Bin", {"item_code": item_code, "warehouse": warehouse}, "projected_qty"
@@ -1658,6 +1667,9 @@ def get_projected_qty(item_code, warehouse):
 
 @frappe.whitelist()
 def get_bin_details(item_code, warehouse, company=None, include_child_warehouses=False):
+	# `select`, not `read`: the selling/buying rows and SellingController reach this with no Item read row
+	frappe.has_permission("Item", ptype="select", throw=True)
+
 	bin_details = {"projected_qty": 0, "actual_qty": 0, "reserved_qty": 0}
 
 	if warehouse:
@@ -1839,6 +1851,16 @@ def get_default_bom(item_code=None):
 
 @frappe.whitelist()
 def get_valuation_rate(item_code, company, warehouse=None):
+	"""Whitelisted entry point: authorise the item, then return its cost price."""
+	frappe.has_permission("Item", doc=item_code, throw=True)
+	frappe.has_permission("Company", doc=company, ptype="select", throw=True)
+
+	return _get_valuation_rate(item_code, company, warehouse)
+
+
+def _get_valuation_rate(item_code, company, warehouse=None):
+	# no guard here: set_valuation_rate calls this for the item and every Product Bundle component,
+	# and a caller entitled to the bundle is not necessarily entitled to each component.
 	if frappe.get_cached_value("Warehouse", warehouse, "is_group"):
 		return {"valuation_rate": 0.0}
 

@@ -12,6 +12,29 @@ from frappe import _, throw
 from frappe.model.document import Document
 from frappe.utils import cint, flt
 
+# the transactions the pricing engine is called for, from transaction.js and the POS
+PRICING_TRANSACTION_DOCTYPES = frozenset(
+	{
+		"Quotation",
+		"Sales Order",
+		"Delivery Note",
+		"Sales Invoice",
+		"POS Invoice",
+		"Supplier Quotation",
+		"Purchase Order",
+		"Purchase Receipt",
+		"Purchase Invoice",
+		"Material Request",
+		# these three also extend a controller that calls the pricing engine: BOM and BOM Creator
+		# through TransactionController, Request for Quotation through BuyingController
+		"BOM",
+		"BOM Creator",
+		"Request for Quotation",
+		# no client sends this one, but set_transaction_type below still branches on it
+		"Opportunity",
+	}
+)
+
 apply_on_dict = {"Item Code": "items", "Item Group": "item_groups", "Brand": "brands"}
 
 other_fields = ["other_item_code", "other_item_group", "other_brand"]
@@ -364,6 +387,18 @@ def apply_pricing_rule(args, doc=None):
 
 	args = frappe._dict(args)
 
+	# The transaction being priced decides who may price it; doc= where the caller named one.
+	# An allow-list, not a type check: any readable doctype would otherwise satisfy has_permission.
+	transaction_doctype = args.get("doctype")
+	if transaction_doctype not in PRICING_TRANSACTION_DOCTYPES:
+		frappe.throw(_("Invalid doctype"), frappe.PermissionError)
+
+	transaction_name = args.get("name")
+	if not isinstance(transaction_name, str) or not frappe.db.exists(transaction_doctype, transaction_name):
+		transaction_name = None
+
+	frappe.has_permission(transaction_doctype, doc=transaction_name, throw=True)
+
 	set_transaction_type(args)
 
 	# list of dictionaries
@@ -389,6 +424,7 @@ def apply_pricing_rule(args, doc=None):
 	for item in item_list:
 		args_copy = copy.deepcopy(args)
 		args_copy.update(item)
+		set_transaction_type(args_copy)
 		data = get_pricing_rule_for_item(args_copy, doc=doc)
 		out.append(data)
 
@@ -722,14 +758,18 @@ def set_transaction_type(pricing_ctx: frappe._dict) -> None:
 @frappe.whitelist()
 @frappe.validate_and_sanitize_search_inputs
 def get_item_uoms(doctype, txt, searchfield, start, page_len, filters):
-	items = [filters.get("value")]
-	if filters.get("apply_on") != "Item Code":
-		field = frappe.scrub(filters.get("apply_on"))
-		items = [d.name for d in frappe.db.get_all("Item", filters={field: filters.get("value")})]
+	if filters.get("apply_on") == "Item Code":
+		item_filters = [["name", "=", filters.get("value")]]
+	else:
+		item_filters = [[frappe.scrub(filters.get("apply_on")), "=", filters.get("value")]]
+
+	items = frappe.get_list("Item", filters=item_filters, pluck="name")
+	if not items:
+		return []
 
 	return frappe.get_all(
 		"UOM Conversion Detail",
-		filters={"parent": ("in", items), "uom": ("like", f"{txt}%")},
+		filters={"parent": ("in", items), "parenttype": "Item", "uom": ("like", f"{txt}%")},
 		fields=["uom"],
 		as_list=1,
 		distinct=True,
