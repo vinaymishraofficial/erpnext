@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 import frappe
 from frappe import _
+from frappe.query_builder.functions import IfNull
 from pypika.terms import ExistsCriterion
 
 
@@ -266,3 +267,171 @@ def handle_exception(doc: "BOMUpdateLog") -> None:
 	frappe.db.rollback()
 	error_log = doc.log_error("BOM Update Tool Error")
 	set_values_in_log(doc.name, {"status": "Failed", "error_log": error_log.name})
+
+
+# Link sub-assembly BOMs
+#
+# A BOM row takes the item's default BOM only when the row is added. When a sub-assembly gets its
+# own BOM later, the rows that already use it keep an empty BOM No, so the BOM tree does not expand
+# it and multi-level Work Orders and Production Plans treat it as a raw material.
+
+LINK_SUB_ASSEMBLY_PROGRESS_TITLE = "Linking Sub-assembly BOMs"
+
+
+def get_unlinked_sub_assembly_rows() -> list[dict]:
+	"""Rows of submitted, active BOMs with no BOM No whose item now has a default BOM that can go in
+	that BOM: submitted, active, same company and currency, and not the BOM's own item."""
+	bom = frappe.qb.DocType("BOM")
+	row = frappe.qb.DocType("BOM Item")
+	item = frappe.qb.DocType("Item")
+	sub_bom = frappe.qb.DocType("BOM").as_("sub_bom")
+	return (
+		frappe.qb.from_(row)
+		.join(bom)
+		.on(bom.name == row.parent)
+		.join(item)
+		.on(item.name == row.item_code)
+		.join(sub_bom)
+		.on(sub_bom.name == item.default_bom)
+		.select(
+			row.name,
+			row.parent,
+			row.idx,
+			row.item_code,
+			row.item_name,
+			sub_bom.name.as_("sub_bom"),
+			sub_bom.is_phantom_bom,
+		)
+		.where(
+			(row.parenttype == "BOM")
+			& (IfNull(row.bom_no, "") == "")
+			& (row.do_not_explode == 0)
+			& (bom.docstatus == 1)
+			& (bom.is_active == 1)
+			& (sub_bom.docstatus == 1)
+			& (sub_bom.is_active == 1)
+			& (sub_bom.company == bom.company)
+			& (sub_bom.currency == bom.currency)
+			& (row.item_code != bom.item)
+		)
+		.orderby(row.parent)
+		.orderby(row.idx)
+	).run(as_dict=True)
+
+
+def plan_sub_assembly_links() -> tuple[list[dict], list[dict], dict[str, set[str]]]:
+	"""Returns (rows to link, rows skipped because the link would make a BOM contain itself,
+	BOM links after linking as parent -> child BOMs)."""
+	children = defaultdict(set)
+	bom_links = get_bom_links_query().as_("bom_links")
+	for link in (
+		frappe.qb.from_(bom_links)
+		.select(bom_links.parent, bom_links.bom_no)
+		.where(IfNull(bom_links.bom_no, "") != "")
+	).run(as_dict=True):
+		children[link.parent].add(link.bom_no)
+
+	to_link, loops = [], []
+	for row in get_unlinked_sub_assembly_rows():
+		if _reaches(children, row.sub_bom, row.parent):
+			loops.append(row)
+		else:
+			to_link.append(row)
+			children[row.parent].add(row.sub_bom)
+
+	return to_link, loops, children
+
+
+def get_boms_to_relink(rows: list[dict], children: dict[str, set[str]]) -> list[str]:
+	"""BOMs with rows to link and every BOM above them, children first."""
+	parents = defaultdict(set)
+	for parent, kids in children.items():
+		for kid in kids:
+			parents[kid].add(parent)
+
+	affected, stack = set(), [row.parent for row in rows]
+	while stack:
+		bom = stack.pop()
+		if bom not in affected:
+			affected.add(bom)
+			stack.extend(parents[bom])
+
+	pending = {bom: children.get(bom, set()) & affected for bom in affected}
+	ordered = []
+	ready = sorted(bom for bom, kids in pending.items() if not kids)
+	while ready:
+		bom = ready.pop()
+		ordered.append(bom)
+		for parent in parents[bom] & affected:
+			pending[parent].discard(bom)
+			if not pending[parent]:
+				ready.append(parent)
+
+	return ordered
+
+
+def link_sub_assembly_boms(user: str | None = None) -> None:
+	"""Background job. Plans again, so it links what is true when it runs, not when the preview was
+	shown. One transaction: if a BOM fails, nothing is linked."""
+	try:
+		message = _link_sub_assembly_boms()
+	except Exception:
+		_publish_link_progress(100, _("Failed"))
+		_notify_user(user, _("Linking sub-assembly BOMs failed. Nothing was changed."), after_commit=False)
+		raise
+
+	_publish_link_progress(100, _("Done"))
+	_notify_user(user, message)
+
+
+def _link_sub_assembly_boms() -> str:
+	rows, _loops, children = plan_sub_assembly_links()
+	if not rows:
+		return _("No sub-assembly BOMs to link.")
+
+	rows_by_bom = defaultdict(dict)
+	for row in rows:
+		rows_by_bom[row.parent][row.name] = row
+
+	frappe.cache().delete_key("bom_children")
+	boms = get_boms_to_relink(rows, children)
+	for i, bom in enumerate(boms):
+		_publish_link_progress(i * 100 / len(boms), _("{0} of {1} BOMs: {2}").format(i + 1, len(boms), bom))
+		bom_obj = frappe.get_doc("BOM", bom)
+		bom_obj._doc_before_save = copy.deepcopy(bom_obj)
+		new_rows = rows_by_bom.get(bom, {})
+		for item in bom_obj.items:
+			if item.name in new_rows:
+				item.bom_no = new_rows[item.name].sub_bom
+				item.is_phantom_item = new_rows[item.name].is_phantom_bom
+				item.db_update()
+		bom_obj.update_exploded_items()
+		bom_obj.calculate_cost(save_updates=True)
+		bom_obj.db_update()
+		bom_obj.save_version()
+
+	return _("Linked {0} sub-assembly rows in {1} BOMs; updated {2} BOMs in all.").format(
+		len(rows), len(rows_by_bom), len(boms)
+	)
+
+
+def _reaches(children: dict[str, set[str]], start: str, target: str) -> bool:
+	seen, stack = set(), [start]
+	while stack:
+		bom = stack.pop()
+		if bom == target:
+			return True
+		if bom not in seen:
+			seen.add(bom)
+			stack.extend(children.get(bom, ()))
+	return False
+
+
+def _publish_link_progress(percent: float, description: str) -> None:
+	"""To the user who started the job (the job runs as them); 100 closes the dialog."""
+	frappe.publish_progress(percent, title=_(LINK_SUB_ASSEMBLY_PROGRESS_TITLE), description=description)
+
+
+def _notify_user(user: str | None, message: str, after_commit: bool = True) -> None:
+	if user:
+		frappe.publish_realtime("msgprint", message, user=user, after_commit=after_commit)

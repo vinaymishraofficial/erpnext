@@ -1,17 +1,25 @@
 # Copyright (c) 2022, Frappe Technologies Pvt. Ltd. and Contributors
 # License: GNU General Public License v3. See license.txt
 
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import timeout
 
+from erpnext.manufacturing.doctype.bom_update_log import bom_updation_utils
 from erpnext.manufacturing.doctype.bom_update_log.test_bom_update_log import (
 	update_cost_in_all_boms_in_test,
 )
-from erpnext.manufacturing.doctype.bom_update_tool.bom_update_tool import enqueue_replace_bom
+from erpnext.manufacturing.doctype.bom_update_tool.bom_update_tool import (
+	enqueue_link_sub_assembly_boms,
+	enqueue_replace_bom,
+	get_unlinked_sub_assemblies,
+)
 from erpnext.manufacturing.doctype.production_plan.test_production_plan import make_bom
 from erpnext.stock.doctype.item.test_item import create_item
 from erpnext.tests.permission_test_utils import (
 	as_user,
+	assert_refused,
 	assert_refused_for_names,
 	assert_refused_without,
 	make_fenced_user,
@@ -103,3 +111,131 @@ class TestBOMUpdateTool(ERPNextTestSuite):
 		with as_user(allowed):
 			enqueue_replace_bom(boms={"current_bom": current_bom, "new_bom": bom_doc.name})
 		self.assertTrue(frappe.db.exists("BOM Item", {"bom_no": bom_doc.name, "parent": parent_bom}))
+
+
+class TestLinkSubAssemblyBOMs(ERPNextTestSuite):
+	"Link sub-assemblies that got their own BOM after they were used in other BOMs."
+
+	def setUp(self):
+		self.tag = frappe.generate_hash(length=6).upper()
+
+	def item(self, name):
+		return create_item(f"_Test Link SA {self.tag} {name}", valuation_rate=100).name
+
+	def bom(self, item, rows):
+		"""rows: (item_code, extra BOM Item fields)"""
+		bom = frappe.get_doc(
+			{
+				"doctype": "BOM",
+				"item": item,
+				"company": "_Test Company",
+				"currency": frappe.get_cached_value("Company", "_Test Company", "default_currency"),
+				"quantity": 1,
+				"is_active": 1,
+				"is_default": 1,
+				"items": [{"item_code": code, "qty": 2, **extra} for code, extra in rows],
+			}
+		)
+		bom.insert()
+		bom.submit()
+		return bom
+
+	def preview(self, boms):
+		preview = get_unlinked_sub_assemblies()
+		return (
+			[(row.parent, row.sub_bom) for row in preview["rows"] if row.parent in boms],
+			[row.parent for row in preview["loops"] if row.parent in boms],
+		)
+
+	def link(self):
+		"""Runs the job inline and returns the progress it reported."""
+		events = []
+		with patch.object(
+			bom_updation_utils.frappe,
+			"publish_progress",
+			lambda percent, **kwargs: events.append((percent, kwargs["description"])),
+		):
+			bom_updation_utils.link_sub_assembly_boms()
+		return events
+
+	def test_links_sub_assembly_and_explodes_it(self):
+		fg, sa, rm1, rm2 = (self.item(name) for name in ("FG", "SA", "RM1", "RM2"))
+		fg_bom = self.bom(fg, [(sa, {}), (rm1, {})])
+		sa_bom = self.bom(sa, [(rm2, {})])
+		self.assertEqual(self.preview({fg_bom.name}), ([(fg_bom.name, sa_bom.name)], []))
+
+		self.link()
+
+		fg_bom.reload()
+		self.assertEqual(next(row for row in fg_bom.items if row.item_code == sa).bom_no, sa_bom.name)
+		self.assertEqual({row.item_code for row in fg_bom.exploded_items}, {rm1, rm2})
+		self.assertEqual(self.preview({fg_bom.name}), ([], []))
+
+	def test_updates_the_boms_above_children_first(self):
+		top, fg, sa, rm = (self.item(name) for name in ("TOP", "FG", "SA", "RM"))
+		fg_bom = self.bom(fg, [(sa, {})])
+		top_bom = self.bom(top, [(fg, {"bom_no": fg_bom.name})])
+		self.bom(sa, [(rm, {})])
+
+		events = self.link()
+
+		top_bom.reload()
+		self.assertEqual({row.item_code for row in top_bom.exploded_items}, {rm})
+		percents = [percent for percent, _description in events]
+		self.assertEqual(percents, sorted(percents))
+		self.assertEqual(events[-1], (100, "Done"))
+		described = [description for _percent, description in events]
+		self.assertLess(
+			next(i for i, d in enumerate(described) if fg_bom.name in d),
+			next(i for i, d in enumerate(described) if top_bom.name in d),
+		)
+
+	def test_skips_do_not_explode_rows(self):
+		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))
+		fg_bom = self.bom(fg, [(sa, {"do_not_explode": 1})])
+		self.bom(sa, [(rm, {})])
+		self.assertEqual(self.preview({fg_bom.name}), ([], []))
+
+	def test_skips_a_link_that_puts_a_bom_inside_itself(self):
+		a, b = self.item("A"), self.item("B")
+		a_bom = self.bom(a, [(b, {})])
+		self.bom(b, [(a, {"bom_no": a_bom.name})])
+		self.assertEqual(self.preview({a_bom.name}), ([], [a_bom.name]))
+
+	def test_closes_progress_when_it_fails(self):
+		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))
+		self.bom(fg, [(sa, {})])
+		self.bom(sa, [(rm, {})])
+
+		events = []
+		with (
+			patch(
+				"erpnext.manufacturing.doctype.bom.bom.BOM.update_exploded_items",
+				side_effect=RuntimeError("boom"),
+			),
+			patch.object(
+				bom_updation_utils.frappe,
+				"publish_progress",
+				lambda percent, **kwargs: events.append((percent, kwargs["description"])),
+			),
+			self.assertRaises(RuntimeError),
+		):
+			bom_updation_utils.link_sub_assembly_boms()
+		self.assertEqual(events[-1], (100, "Failed"))
+
+	def test_needs_bom_update_tool_permission(self):
+		user = make_fenced_user("link-sa-no-role@example.com", ["Stock User"])
+		with as_user(user):
+			assert_refused(self, get_unlinked_sub_assemblies)
+			assert_refused(self, enqueue_link_sub_assembly_boms)
+
+	def test_needs_write_on_every_bom_it_rewrites(self):
+		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))
+		fg_bom = self.bom(fg, [(sa, {})])
+		sa_bom = self.bom(sa, [(rm, {})])
+		# May write the sub-assembly's BOM, but not the BOM the link would rewrite.
+		user = make_fenced_user(
+			"link-sa-fenced@example.com", ["Manufacturing Manager"], [("BOM", sa_bom.name)]
+		)
+		with as_user(user):
+			assert_refused_without(self, [fg_bom.name], enqueue_link_sub_assembly_boms)

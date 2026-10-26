@@ -2,7 +2,7 @@
  "actions": [],
  "allow_copy": 1,
  "creation": "2012-12-06 12:10:10",
- "description": "Replace a BOM everywhere it is used, or update the cost of all BOMs.",
+ "description": "Replace a BOM everywhere it is used, update the cost of all BOMs, or link sub-assemblies to their BOMs.",
  "doctype": "DocType",
  "document_type": "Other",
  "documentation": "https://docs.frappe.io/erpnext/user/manual/en/bom-update-tool",
@@ -13,7 +13,9 @@
   "new_bom",
   "replace",
   "update_cost_section",
-  "update_latest_price_in_all_boms"
+  "update_latest_price_in_all_boms",
+  "link_sub_assembly_section",
+  "link_sub_assembly_boms"
  ],
  "fields": [
   {
@@ -53,6 +55,17 @@
    "fieldname": "update_latest_price_in_all_boms",
    "fieldtype": "Button",
    "label": "Update latest price in all BOMs"
+  },
+  {
+   "description": "Fill the BOM No of rows whose item got its own BOM after it was used in other BOMs, and update their exploded items and cost.",
+   "fieldname": "link_sub_assembly_section",
+   "fieldtype": "Section Break",
+   "label": "Link Sub-assembly BOMs"
+  },
+  {
+   "fieldname": "link_sub_assembly_boms",
+   "fieldtype": "Button",
+   "label": "Link sub-assembly BOMs"
   }
  ],
  "hide_toolbar": 1,
@@ -61,7 +74,7 @@
  "in_create": 1,
  "issingle": 1,
  "links": [],
- "modified": "2024-03-27 13:06:41.828828",
+ "modified": "2026-10-26 15:00:00.000000",
  "modified_by": "Administrator",
  "module": "Manufacturing",
  "name": "BOM Update Tool",

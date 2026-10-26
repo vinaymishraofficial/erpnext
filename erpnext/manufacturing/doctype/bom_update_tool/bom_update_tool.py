@@ -69,6 +69,45 @@ def enqueue_update_cost() -> "BOMUpdateLog":
 	return update_log
 
 
+@frappe.whitelist()
+def get_unlinked_sub_assemblies() -> dict:
+	"""Preview for "Link sub-assembly BOMs": the rows that would be linked, and those skipped."""
+	_require_tool_permission()
+	from erpnext.manufacturing.doctype.bom_update_log.bom_updation_utils import plan_sub_assembly_links
+
+	rows, loops, _children = plan_sub_assembly_links()
+	return {"rows": rows, "loops": loops, "boms": len({row.parent for row in rows})}
+
+
+@frappe.whitelist(methods=["POST"])
+def enqueue_link_sub_assembly_boms() -> None:
+	"""Queues the job that fills BOM No in rows whose item got its own BOM later."""
+	_require_tool_permission()
+	from erpnext.manufacturing.doctype.bom_update_log.bom_updation_utils import (
+		get_boms_to_relink,
+		plan_sub_assembly_links,
+	)
+
+	rows, _loops, children = plan_sub_assembly_links()
+	for bom in get_boms_to_relink(rows, children):
+		require_permission("BOM", bom, "write")
+
+	frappe.enqueue(
+		"erpnext.manufacturing.doctype.bom_update_log.bom_updation_utils.link_sub_assembly_boms",
+		queue="long",
+		timeout=3600,
+		job_id="link_sub_assembly_boms",
+		deduplicate=True,
+		enqueue_after_commit=True,
+		user=frappe.session.user,
+	)
+
+
+def _require_tool_permission() -> None:
+	if not frappe.has_permission("BOM Update Tool", "write"):
+		_refuse()
+
+
 def auto_update_latest_price_in_all_boms() -> None:
 	"""Called via hooks.py."""
 	if frappe.db.get_single_value("Manufacturing Settings", "update_bom_costs_automatically"):

@@ -75,6 +75,78 @@ frappe.ui.form.on("BOM Update Tool", {
 		});
 	},
 
+	link_sub_assembly_boms: (frm) => {
+		frappe.call({
+			method: "erpnext.manufacturing.doctype.bom_update_tool.bom_update_tool.get_unlinked_sub_assemblies",
+			freeze: true,
+			callback: ({ message }) => {
+				if (!message) return;
+				if (!message.rows.length) {
+					frappe.msgprint(__("Every sub-assembly in active BOMs is already linked to its BOM."));
+					return;
+				}
+				frm.events.confirm_sub_assembly_links(frm, message);
+			},
+		});
+	},
+
+	confirm_sub_assembly_links: (frm, preview) => {
+		const esc = frappe.utils.escape_html;
+		const bom_link = (name) => `<a href="${frappe.utils.get_form_link("BOM", name)}">${esc(name)}</a>`;
+		const rows = preview.rows
+			.map(
+				(row) => `<tr>
+					<td>${bom_link(row.parent)}</td>
+					<td>${cint(row.idx)}</td>
+					<td>${esc(row.item_code)}<div class="text-muted small">${esc(row.item_name || "")}</div></td>
+					<td>${bom_link(row.sub_bom)}</td>
+				</tr>`
+			)
+			.join("");
+		const loops = preview.loops.length
+			? `<p class="text-warning">${__("{0} rows skipped: linking them would put a BOM inside itself.", [
+					preview.loops.length,
+			  ])}</p>`
+			: "";
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Link Sub-assembly BOMs"),
+			size: "extra-large",
+			fields: [{ fieldtype: "HTML", fieldname: "preview" }],
+			primary_action_label: __("Link {0} rows", [preview.rows.length]),
+			primary_action: () => {
+				dialog.hide();
+				frappe.call({
+					method: "erpnext.manufacturing.doctype.bom_update_tool.bom_update_tool.enqueue_link_sub_assembly_boms",
+					type: "POST",
+					freeze: true,
+					// The job reports progress under the same title, so it fills this dialog.
+					callback: (r) =>
+						!r.exc &&
+						frappe.show_progress(__("Linking Sub-assembly BOMs"), 0, 100, __("Starting…"), true),
+				});
+			},
+		});
+		dialog.fields_dict.preview.$wrapper.html(`
+			<p>${__(
+				"{0} rows in {1} active BOMs use an item that now has its own default BOM. Their BOM No will be set, and the exploded items and cost of these BOMs and every BOM above them will be updated.",
+				[preview.rows.length, preview.boms]
+			)}</p>
+			<p class="text-muted">${__(
+				"New Work Orders with Use Multi-Level BOM will take the sub-assembly's raw materials. Existing Work Orders do not change."
+			)}</p>
+			${loops}
+			<div style="max-height: 50vh; overflow: auto;">
+				<table class="table table-bordered table-sm">
+					<thead><tr>
+						<th>${__("BOM")}</th><th>${__("Row")}</th><th>${__("Item")}</th><th>${__("Sub-assembly BOM")}</th>
+					</tr></thead>
+					<tbody>${rows}</tbody>
+				</table>
+			</div>`);
+		dialog.show();
+	},
+
 	confirm_job_start: (frm, log_data) => {
 		let log_link = frappe.utils.get_form_link("BOM Update Log", log_data.name, true);
 		frappe.msgprint({
