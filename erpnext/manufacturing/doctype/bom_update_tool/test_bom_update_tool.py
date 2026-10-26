@@ -122,8 +122,8 @@ class TestLinkSubAssemblyBOMs(ERPNextTestSuite):
 	def item(self, name):
 		return create_item(f"_Test Link SA {self.tag} {name}", valuation_rate=100).name
 
-	def bom(self, item, rows):
-		"""rows: (item_code, extra BOM Item fields)"""
+	def bom(self, item, rows, **fields):
+		"""rows: (item_code, extra BOM Item fields); fields: extra BOM fields"""
 		bom = frappe.get_doc(
 			{
 				"doctype": "BOM",
@@ -134,6 +134,7 @@ class TestLinkSubAssemblyBOMs(ERPNextTestSuite):
 				"is_active": 1,
 				"is_default": 1,
 				"items": [{"item_code": code, "qty": 2, **extra} for code, extra in rows],
+				**fields,
 			}
 		)
 		bom.insert()
@@ -146,6 +147,13 @@ class TestLinkSubAssemblyBOMs(ERPNextTestSuite):
 			[(row.parent, row.sub_bom) for row in preview["rows"] if row.parent in boms],
 			[row.parent for row in preview["loops"] if row.parent in boms],
 		)
+
+	def waiting(self, boms):
+		return [
+			(row.parent, row.sub_bom)
+			for row in get_unlinked_sub_assemblies()["zero_cost"]
+			if row.parent in boms
+		]
 
 	def link(self):
 		"""Runs the job inline and returns the progress it reported."""
@@ -189,6 +197,33 @@ class TestLinkSubAssemblyBOMs(ERPNextTestSuite):
 			next(i for i, d in enumerate(described) if fg_bom.name in d),
 			next(i for i, d in enumerate(described) if top_bom.name in d),
 		)
+
+	def test_waits_while_the_sub_assembly_bom_costs_0(self):
+		"""Linking would turn the row's rate from the item's own rate into the sub-BOM's 0."""
+		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))
+		frappe.db.set_value("Item", rm, "valuation_rate", 0)
+		fg_bom = self.bom(fg, [(sa, {})])
+		sa_bom = self.bom(sa, [(rm, {})])
+		self.assertEqual(sa_bom.total_cost, 0)
+		self.assertEqual(self.preview({fg_bom.name}), ([], []))
+		self.assertEqual(self.waiting({fg_bom.name}), [(fg_bom.name, sa_bom.name)])
+
+		self.link()
+		fg_bom.reload()
+		self.assertFalse(fg_bom.items[0].bom_no)
+
+		# Once the sub-assembly BOM has a cost, the row is linked.
+		frappe.db.set_value("Item", rm, "valuation_rate", 4)
+		sa_bom.reload()
+		sa_bom.update_cost(update_parent=False, from_child_bom=True)
+		self.assertEqual(self.preview({fg_bom.name}), ([(fg_bom.name, sa_bom.name)], []))
+
+	def test_links_a_zero_cost_sub_assembly_when_the_bom_does_not_take_its_rate(self):
+		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))
+		frappe.db.set_value("Item", rm, "valuation_rate", 0)
+		fg_bom = self.bom(fg, [(sa, {})], set_rate_of_sub_assembly_item_based_on_bom=0)
+		sa_bom = self.bom(sa, [(rm, {})])
+		self.assertEqual(self.preview({fg_bom.name}), ([(fg_bom.name, sa_bom.name)], []))
 
 	def test_skips_do_not_explode_rows(self):
 		fg, sa, rm = (self.item(name) for name in ("FG", "SA", "RM"))

@@ -301,6 +301,8 @@ def get_unlinked_sub_assembly_rows() -> list[dict]:
 			row.item_name,
 			sub_bom.name.as_("sub_bom"),
 			sub_bom.is_phantom_bom,
+			sub_bom.total_cost.as_("sub_bom_cost"),
+			bom.set_rate_of_sub_assembly_item_based_on_bom.as_("rate_from_sub_bom"),
 		)
 		.where(
 			(row.parenttype == "BOM")
@@ -319,9 +321,14 @@ def get_unlinked_sub_assembly_rows() -> list[dict]:
 	).run(as_dict=True)
 
 
-def plan_sub_assembly_links() -> tuple[list[dict], list[dict], dict[str, set[str]]]:
-	"""Returns (rows to link, rows skipped because the link would make a BOM contain itself,
-	BOM links after linking as parent -> child BOMs)."""
+def plan_sub_assembly_links() -> tuple[list[dict], list[dict], list[dict], dict[str, set[str]]]:
+	"""Returns (rows to link, rows skipped because the link would make a BOM contain itself, rows
+	skipped because their rate would drop to 0, BOM links after linking as parent -> child BOMs).
+
+	A BOM with "Set rate of sub-assembly item based on BOM" ticked (or a phantom sub-assembly)
+	takes the sub-assembly BOM's cost as the row's rate. When that BOM costs 0 (its components
+	have no rate yet), linking would turn the row's rate from the item's own rate into 0, so the
+	row waits until the sub-assembly BOM has a cost."""
 	children = defaultdict(set)
 	bom_links = get_bom_links_query().as_("bom_links")
 	for link in (
@@ -331,15 +338,17 @@ def plan_sub_assembly_links() -> tuple[list[dict], list[dict], dict[str, set[str
 	).run(as_dict=True):
 		children[link.parent].add(link.bom_no)
 
-	to_link, loops = [], []
+	to_link, loops, zero_cost = [], [], []
 	for row in get_unlinked_sub_assembly_rows():
-		if _reaches(children, row.sub_bom, row.parent):
+		if not row.sub_bom_cost and (row.rate_from_sub_bom or row.is_phantom_bom):
+			zero_cost.append(row)
+		elif _reaches(children, row.sub_bom, row.parent):
 			loops.append(row)
 		else:
 			to_link.append(row)
 			children[row.parent].add(row.sub_bom)
 
-	return to_link, loops, children
+	return to_link, loops, zero_cost, children
 
 
 def get_boms_to_relink(rows: list[dict], children: dict[str, set[str]]) -> list[str]:
@@ -385,7 +394,7 @@ def link_sub_assembly_boms(user: str | None = None) -> None:
 
 
 def _link_sub_assembly_boms() -> str:
-	rows, _loops, children = plan_sub_assembly_links()
+	rows, _loops, _zero_cost, children = plan_sub_assembly_links()
 	if not rows:
 		return _("No sub-assembly BOMs to link.")
 

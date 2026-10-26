@@ -82,12 +82,30 @@ frappe.ui.form.on("BOM Update Tool", {
 			callback: ({ message }) => {
 				if (!message) return;
 				if (!message.rows.length) {
-					frappe.msgprint(__("Every sub-assembly in active BOMs is already linked to its BOM."));
+					frappe.msgprint({
+						title: __("Link Sub-assembly BOMs"),
+						message:
+							frm.events.zero_cost_note(message) ||
+							__("Every sub-assembly in active BOMs is already linked to its BOM."),
+					});
 					return;
 				}
 				frm.events.confirm_sub_assembly_links(frm, message);
 			},
 		});
+	},
+
+	// Rows whose sub-assembly BOM costs 0 wait: linking would turn their rate into 0.
+	zero_cost_note: (preview) => {
+		if (!preview.zero_cost.length) return "";
+		const esc = frappe.utils.escape_html;
+		const boms = [...new Set(preview.zero_cost.map((row) => row.sub_bom))]
+			.map((name) => `<a href="${frappe.utils.get_form_link("BOM", name)}">${esc(name)}</a>`)
+			.join(", ");
+		return `<p class="text-warning">${__(
+			"{0} rows wait: their sub-assembly BOM costs 0, so linking would make their rate 0. Give the components of these BOMs a rate, then link again:",
+			[preview.zero_cost.length]
+		)} ${boms}</p>`;
 	},
 
 	confirm_sub_assembly_links: (frm, preview) => {
@@ -136,6 +154,7 @@ frappe.ui.form.on("BOM Update Tool", {
 				"New Work Orders with Use Multi-Level BOM will take the sub-assembly's raw materials. Existing Work Orders do not change."
 			)}</p>
 			${loops}
+			${frm.events.zero_cost_note(preview)}
 			<div style="max-height: 50vh; overflow: auto;">
 				<table class="table table-bordered table-sm">
 					<thead><tr>

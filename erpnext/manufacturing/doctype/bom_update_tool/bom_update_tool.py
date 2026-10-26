@@ -75,8 +75,13 @@ def get_unlinked_sub_assemblies() -> dict:
 	_require_tool_permission()
 	from erpnext.manufacturing.doctype.bom_update_log.bom_updation_utils import plan_sub_assembly_links
 
-	rows, loops, _children = plan_sub_assembly_links()
-	return {"rows": rows, "loops": loops, "boms": len({row.parent for row in rows})}
+	rows, loops, zero_cost, _children = plan_sub_assembly_links()
+	return {
+		"rows": rows,
+		"loops": loops,
+		"zero_cost": zero_cost,
+		"boms": len({row.parent for row in rows}),
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -88,7 +93,7 @@ def enqueue_link_sub_assembly_boms() -> None:
 		plan_sub_assembly_links,
 	)
 
-	rows, _loops, children = plan_sub_assembly_links()
+	rows, _loops, _zero_cost, children = plan_sub_assembly_links()
 	for bom in get_boms_to_relink(rows, children):
 		require_permission("BOM", bom, "write")
 
